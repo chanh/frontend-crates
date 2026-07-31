@@ -42,6 +42,7 @@
 //! `extract_reasoning_streaming` as two chained APIs behind a unified interface
 //! (only gemma4 is natively unified there), which reproduces the same seam.
 
+pub mod gemma4;
 pub mod qwen3;
 
 use std::collections::BTreeMap;
@@ -50,6 +51,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::tool_calling::scan::{
     InvokeEmitter, ReasoningSpec, WrappedBlockScanner, marker_prefix_suffix_len, push_run,
+    reasoning_opener_len,
 };
 use crate::tool_calling::traits::{Result, Tool, ToolCallDelta, ToolParseResult};
 
@@ -704,6 +706,8 @@ fn guided_holdback_len(
     input: &str,
     reasoning_markers: &[&str],
     control: &[String],
+    // `(start, label)` when the family's opener carries a structural role label.
+    start_label: Option<(&str, &str)>,
     flush: bool,
 ) -> usize {
     if flush {
@@ -738,7 +742,19 @@ fn guided_holdback_len(
         .map(|at| input.len() - at)
         .max()
         .unwrap_or(0);
-    split.max(pending_prefix_form)
+    // A COMPLETE opener whose role label is still arriving. The label decides
+    // where the thought's TEXT begins, so releasing these bytes early emits the
+    // half-label as reasoning and can never be taken back. The native scanner
+    // holds them for the same reason (`pending_label_len`); holding them here
+    // too is what keeps a chunk boundary from changing the output (`I6`).
+    let pending_label = start_label
+        .and_then(|(start, label)| {
+            let at = input.rfind(start)?;
+            let rest = &input[at + start.len()..];
+            (rest.len() < label.len() && label.starts_with(rest)).then_some(input.len() - at)
+        })
+        .unwrap_or(0);
+    split.max(pending_prefix_form).max(pending_label)
 }
 
 /// Whether a buffered guided run has opened a JSON value. Anything before the
@@ -949,6 +965,27 @@ impl GuidedState {
     /// Strip the reasoning markers wrapping the JSON payload. Once visible
     /// output starts every later byte is JSON data, so native-looking strings
     /// inside argument values stay literal.
+    /// Bytes the opener at `at` occupies in `self.input`, role label included.
+    ///
+    /// Delegates to the scanner's [`reasoning_opener_len`] so guided and native
+    /// cannot disagree about where a thought's text starts. `None` = the label
+    /// is still arriving; the caller must leave the opener unconsumed.
+    fn opener_len_at(&self, at: usize, flush: bool) -> Option<usize> {
+        reasoning_opener_len(
+            self.reasoning.start,
+            self.reasoning.start_label,
+            &self.input[at + self.reasoning.start.len()..],
+            flush,
+        )
+    }
+
+    /// `(start, label)` for the holdback, when this family labels its opener.
+    fn start_label(&self) -> Option<(&str, &str)> {
+        self.reasoning
+            .start_label
+            .map(|l| (self.reasoning.start, l))
+    }
+
     fn drain(&mut self, flush: bool) -> Vec<UnifiedDelta> {
         let (start, end) = (self.reasoning.start, self.reasoning.end);
         let mut output = Vec::new();
@@ -1021,7 +1058,13 @@ impl GuidedState {
                     let closer_first = matches!((open_at, close_at), (Some(o), Some(c)) if c < o)
                         || (open_at.is_none() && close_at.is_some());
 
-                    if !closer_first && let Some(at) = open_at {
+                    // An undecided role label means we cannot yet tell where the
+                    // thought's text begins, so the opener stays unconsumed and the
+                    // holdback keeps its bytes back until the next chunk settles it.
+                    if !closer_first
+                        && let Some(at) = open_at
+                        && let Some(open_len) = self.opener_len_at(at, flush)
+                    {
                         // Whatever was buffered as "payload so far", plus this prefix,
                         // was visible text after all — a thought is opening behind it.
                         let mut pending = std::mem::take(&mut self.json);
@@ -1033,7 +1076,7 @@ impl GuidedState {
                         } else {
                             push_run(&mut output, Kind::Text, &pending);
                         }
-                        self.input.drain(..at + start.len());
+                        self.input.drain(..at + open_len);
                         self.mode = GuidedMode::Reasoning;
                         self.accept_redundant_reasoning_start = false;
                         continue;
@@ -1076,6 +1119,7 @@ impl GuidedState {
                             &self.input,
                             reasoning_markers,
                             &self.control_markers,
+                            self.start_label(),
                             flush,
                         )
                     };
@@ -1123,9 +1167,13 @@ impl GuidedState {
                     if self.accept_redundant_reasoning_start {
                         let non_whitespace = self.input.trim_start();
                         let leading = self.input.len() - non_whitespace.len();
-                        if non_whitespace.starts_with(start) {
+                        // A redundant opener carries its role label too, so consume
+                        // both; an undecided label falls through to the holdback.
+                        if non_whitespace.starts_with(start)
+                            && let Some(open_len) = self.opener_len_at(leading, flush)
+                        {
                             push_run(&mut output, Kind::Reasoning, &self.input[..leading]);
-                            self.input.drain(..leading + start.len());
+                            self.input.drain(..leading + open_len);
                             self.accept_redundant_reasoning_start = false;
                             continue;
                         }
@@ -1146,11 +1194,11 @@ impl GuidedState {
                     // — and being inside a thought must not turn markup into content
                     // (`I3`). Taking whichever lands first keeps the two request
                     // modes byte-identical on the same reasoning bytes.
-                    // Three ways an open thought can end, in the same precedence the
-                    // native scanner uses: its own closer; a TOOL OPENER, which
-                    // terminates the span without being consumed because tool
-                    // structure dominates reasoning; or a stray, which is stripped
-                    // and leaves the span open.
+                    // ONE way an open thought ends here: its own closer. A tool
+                    // opener does NOT end it — see below — and a stray is stripped
+                    // in place, leaving the span open. This is the one precedence
+                    // rule the guided channel does not borrow from the native
+                    // scanner, and gemma4 inherits it for the same reason qwen3 does.
                     let close = self.input.find(end).map(|at| (at, end.len(), true));
                     // Under guided decoding the reasoning channel is UNCONSTRAINED, so
                     // the model can legitimately narrate `<tool_call>` while thinking —
@@ -1171,7 +1219,11 @@ impl GuidedState {
                         flush,
                     )
                     .into_iter()
-                    .chain(self.input.find(start).map(|at| (at, start.len())))
+                    .chain(
+                        self.input
+                            .find(start)
+                            .and_then(|at| Some((at, self.opener_len_at(at, flush)?))),
+                    )
                     .min_by_key(|(at, _)| *at)
                     .map(|(at, len)| (at, len, false));
                     if let Some((at, consume, closes)) = [close, stray]
@@ -1207,6 +1259,7 @@ impl GuidedState {
                             &self.input,
                             &[start, end],
                             &self.control_markers,
+                            self.start_label(),
                             flush,
                         )
                     };
@@ -1436,6 +1489,7 @@ macro_rules! unified_registry {
 
 unified_registry! {
     "qwen3" | "qwen3_coder" => qwen3::qwen3_unified,
+    "gemma4"                => gemma4::gemma4_unified,
 }
 
 /// Stderr instrumentation for the unified path under `DYNAMO_PARSERS_DEBUG`.
@@ -1575,6 +1629,8 @@ mod tests {
             ReasoningSpec {
                 start: "<think>",
                 end: "</think>",
+                // `<think>` carries no role label, same as the qwen3 spec this fixture mirrors.
+                start_label: None,
                 forced_start: false,
             },
             vec!["<tool_call>".into(), "</tool_call>".into()],

@@ -18,7 +18,11 @@ chunks, parser}}}. Runs on the HOST (needs cargo + the vLLM rust source).
 
 Usage:
   python3 capture_vllm_rust_unified.py --vllm-rust-source /path/to/vllm-0.25.1/rust \
-      --job job.json --out conformance/unified/vllm_rust_capture.json
+      --job job.json --out conformance/unified/vllm_rust_capture.yaml
+
+Write it as `vllm_rust_capture.yaml` — that is the name explode_unified_fixtures.py
+reads. A `.json` here parses fine but the exploder never opens it, so the packaged
+vllm_rust shard silently keeps its previous capture.
 """
 from __future__ import annotations
 

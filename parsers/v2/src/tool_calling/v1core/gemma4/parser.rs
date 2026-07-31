@@ -131,7 +131,13 @@ fn parse_recoverable_call_at(
     None
 }
 
-fn is_call_prefix_boundary(input: &str, idx: usize) -> bool {
+/// True when `idx` sits on a `call:` word boundary — the preceding character is
+/// not part of an identifier, so `call:` at the start of a word counts but the
+/// one inside `recall:` does not.
+///
+/// Public because the streaming scanner asks the same question about the same
+/// grammar; a second copy of this rule is a copy that drifts.
+pub fn is_call_prefix_boundary(input: &str, idx: usize) -> bool {
     idx == 0
         || input[..idx]
             .chars()
@@ -195,296 +201,69 @@ fn has_bare_call_body_start(input: &str) -> bool {
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
 }
 
-/// Returns the position immediately after the last *complete* tool-call match
-/// in `chunk`, or `None` if no complete call has arrived yet (caller should
-/// keep accumulating). The string-aware balanced scanner requires `}<tool_call|>`
-/// adjacency at the real object close, so a bare `<tool_call|>` literal embedded
-/// inside a `<|"|>` string value does not false-trigger a "section complete"
-/// signal here — matches upstream.
-pub fn find_tool_call_end_position_gemma4(chunk: &str) -> Option<usize> {
-    let mut cursor = 0usize;
-    let mut last_end = None;
+/// Returns the position immediately after the end of the ONE call that begins at
+/// byte 0 of `chunk` (`call:NAME{…}<tool_call|>`, with or without a leading
+/// `<|tool_call>`), or `None` while that call is still incomplete.
+///
+/// v1's `find_tool_call_end_position_gemma4` answers "where does the LAST
+/// complete call in this blob end", which a streaming scanner cannot use
+/// directly: it has to consume calls ONE at a time to keep per-call source
+/// order. Both resolve the end with the same string-aware balanced scan, so a
+/// `}<tool_call|>` occurring inside a `<|"|>` string value is data (`I7`).
+///
+/// `allow_missing_end` is end-of-stream: a body that balanced but whose
+/// `<tool_call|>` never streamed is still recoverable (case `5.b`), and the whole
+/// remaining text belongs to it. Mid-stream it must stay `None` so the scanner
+/// keeps accumulating instead of cutting the call at the first plausible spot.
+pub fn find_leading_tool_call_end_gemma4(chunk: &str, allow_missing_end: bool) -> Option<usize> {
+    let starts_wrapped = chunk.starts_with(TOOL_CALL_START);
+    if !starts_wrapped && !chunk.starts_with(CALL_PREFIX) {
+        return None;
+    }
+    let allow_missing_start = !starts_wrapped;
 
-    while cursor < chunk.len() {
-        let next_start = chunk[cursor..]
-            .find(TOOL_CALL_START)
-            .map(|rel| (cursor + rel, false, TOOL_CALL_START.len()));
-        let next_bare =
-            find_call_prefix_at_boundary(chunk, cursor).map(|idx| (idx, true, CALL_PREFIX.len()));
-        let Some((rel_start, allow_missing_start, marker_len)) = [next_start, next_bare]
-            .into_iter()
-            .flatten()
-            .min_by_key(|(idx, _, _)| *idx)
-        else {
-            break;
-        };
-
-        if let Some((_, _, consumed)) =
-            parse_recoverable_call_at(&chunk[rel_start..], allow_missing_start, false)
-        {
-            let mut end = rel_start + consumed;
-            while chunk[end..].starts_with(TOOL_CALL_END) {
-                end += TOOL_CALL_END.len();
-            }
-            last_end = Some(end);
-            cursor = end;
-        } else {
-            cursor = rel_start + marker_len;
+    if let Some((_, _, consumed)) = parse_recoverable_call_at(chunk, allow_missing_start, false) {
+        // Absorb a repeated close (`}<tool_call|><tool_call|>`) so the duplicate
+        // does not survive as an orphan marker, matching the batch scan above.
+        let mut end = consumed;
+        while chunk[end..].starts_with(TOOL_CALL_END) {
+            end += TOOL_CALL_END.len();
         }
+        return Some(end);
     }
 
-    last_end
+    if !allow_missing_end {
+        return None;
+    }
+    // End of stream with a balanced body and no close marker. Everything left is
+    // this call's markup — `parse_recoverable_call_at` only accepts the missing
+    // end when what follows the body is whitespace — so the scanner consumes it
+    // rather than emitting the tail as text.
+    parse_recoverable_call_at(chunk, allow_missing_start, true).map(|_| chunk.len())
 }
 
-fn push_recovered_call(
-    calls: &mut Vec<ToolCallResponse>,
-    first_tool_start: &mut Option<usize>,
-    removed_spans: &mut Vec<(usize, usize)>,
-    absolute_start: usize,
-    recovered: (&str, &str, usize),
+/// Parse ONE already-delimited Gemma 4 call — `[<|tool_call>]call:NAME{…}` with
+/// or without its trailing `<tool_call|>` — into a typed call, or `None` if the
+/// text is not a call at all.
+///
+/// The caller has ALREADY resolved this call's bounds (with
+/// [`find_leading_tool_call_end_gemma4`]), so this must NOT re-discover them:
+/// `try_tool_call_parse_gemma4` scans spans and refuses a call that is missing
+/// both its opener and its closer, which is precisely the shape a streaming
+/// scanner produces when it consumed the opener as block markup and the closer
+/// never arrived (case `5.b`). Re-deriving bounds a caller already established is
+/// also how an argument value gets truncated at a marker-looking substring
+/// (`I7`), which is why the qwen3 emitter parses its block directly too.
+pub fn parse_one_tool_call_gemma4(
+    invoke: &str,
     tools: Option<&[ToolDefinition]>,
-    reason: &'static str,
-) -> anyhow::Result<()> {
-    if first_tool_start.is_none_or(|idx| absolute_start < idx) {
-        *first_tool_start = Some(absolute_start);
-    }
-    // Record the byte span of the recovered call so the normal_text assembler
-    // can strip exactly this markup and keep the surrounding natural text.
-    removed_spans.push((absolute_start, absolute_start + recovered.2));
-    tracing::warn!(
-        why = reason,
-        recovered_calls = 1,
-        recovered_bytes = recovered.2,
-        "gemma4 recovery: recovered complete call body from damaged wrapper"
-    );
-    calls.push(parse_gemma_call_parts(recovered.0, recovered.1, tools)?);
-    Ok(())
-}
-
-fn recover_calls_in_span(
-    span: &str,
-    span_offset: usize,
-    allow_missing_end: bool,
-    tools: Option<&[ToolDefinition]>,
-    calls: &mut Vec<ToolCallResponse>,
-    first_tool_start: &mut Option<usize>,
-    removed_spans: &mut Vec<(usize, usize)>,
-) -> anyhow::Result<()> {
-    let mut cursor = 0usize;
-
-    while cursor < span.len() {
-        let next_start = span[cursor..]
-            .find(TOOL_CALL_START)
-            .map(|rel| (cursor + rel, false, TOOL_CALL_START.len()));
-        let next_bare =
-            find_call_prefix_at_boundary(span, cursor).map(|idx| (idx, true, CALL_PREFIX.len()));
-        let Some((rel_start, allow_missing_start, marker_len)) = [next_start, next_bare]
-            .into_iter()
-            .flatten()
-            .min_by_key(|(idx, _, _)| *idx)
-        else {
-            break;
-        };
-
-        let parsed = parse_recoverable_call_at(
-            &span[rel_start..],
-            allow_missing_start,
-            allow_missing_end && !allow_missing_start,
-        );
-
-        if let Some(recovered) = parsed {
-            let reason = if allow_missing_start {
-                "missing_start_recovery"
-            } else {
-                "missing_end_recovery"
-            };
-            push_recovered_call(
-                calls,
-                first_tool_start,
-                removed_spans,
-                span_offset + rel_start,
-                recovered,
-                tools,
-                reason,
-            )?;
-            cursor = rel_start + recovered.2;
-        } else {
-            cursor = rel_start + marker_len;
-        }
-    }
-
-    Ok(())
-}
-
-/// Parse a Gemma 4 model response into structured tool calls + leftover text.
-///
-/// Returns `(parsed_tool_calls, normal_text_content)`. `normal_text` is the
-/// model text with each complete tool-call block (start marker `<|tool_call>`
-/// through end marker `<tool_call|>`) removed, keeping ALL other text:
-/// the prefix before the first call, the text BETWEEN calls, and the text
-/// AFTER the last call. Interior whitespace is preserved as-is (only the
-/// outermost ends are trimmed, matching the rest of the parser family); only
-/// tool-call markup is stripped, natural text is never dropped, and markup
-/// never leaks.
-///
-/// This is a deliberate divergence from upstream vLLM
-/// (`vllm/tool_parsers/gemma4_tool_parser.py::extract_tool_calls`, which keeps
-/// only `model_output[:content_end].strip()`, i.e. the prefix before the first
-/// marker) and from SGLang (which also drops trailing narration). Dynamo
-/// preserves the surrounding narration so a model that sandwiches a tool call
-/// between sentences doesn't silently lose the user-visible text. Cases:
-/// TOOLCALLING.batch.{2.c, 8.b, 8.c, 8.d}.
-///
-/// Malformed / unrecoverable / truncated tool-call markup keeps its no-leak
-/// drop behavior: a gap that still contains gemma4 markup tokens after the
-/// complete calls are removed is suppressed rather than echoed verbatim.
-///
-/// Primary extraction uses the string-aware balanced scanner
-/// (`find_balanced_args_end`), so a `}<tool_call|>` sequence embedded inside a
-/// `<|"|>`-delimited string arg (e.g. a `description` field documenting the
-/// tool-call format) is treated as data and does not truncate the call early.
-pub fn try_tool_call_parse_gemma4(
-    message: &str,
-    tools: Option<&[ToolDefinition]>,
-) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
-    let mut calls = Vec::new();
-    let mut first_tool_start = None;
-    // Byte spans of every complete (parsed or recovered) tool-call block, used
-    // to subtract markup from the assembled normal_text below.
-    let mut removed_spans: Vec<(usize, usize)> = Vec::new();
-    // `gap_start` is the end of the last complete call (start of the current
-    // natural-text gap); `scan` is where we look for the next start marker.
-    let mut gap_start = 0usize;
-    let mut scan = 0usize;
-
-    // Primary extraction: walk each `<|tool_call>` start marker and resolve the
-    // matching end with the string-aware balanced scanner (`find_balanced_args_end`
-    // via `parse_recoverable_call_at`) rather than a lazy `.*?}<tool_call|>` regex.
-    // A `}<tool_call|>` sequence embedded inside a `<|"|>`-delimited string value
-    // is data, not a terminator, so it must NOT truncate the call — the scanner
-    // ignores braces/markers while `in_string`, matching upstream vLLM.
-    while scan < message.len() {
-        let Some(rel) = message[scan..].find(TOOL_CALL_START) else {
-            break;
-        };
-        let start = scan + rel;
-
-        // A complete call requires both the start marker and the `<tool_call|>`
-        // end after the balanced args body.
-        match parse_recoverable_call_at(&message[start..], false, false) {
-            Some((name, args_raw, consumed)) => {
-                // Recover any missing-start (bare `call:`) blocks in the gap that
-                // precedes this complete call, preserving natural text between them.
-                recover_calls_in_span(
-                    &message[gap_start..start],
-                    gap_start,
-                    false,
-                    tools,
-                    &mut calls,
-                    &mut first_tool_start,
-                    &mut removed_spans,
-                )?;
-                first_tool_start.get_or_insert(start);
-                removed_spans.push((start, start + consumed));
-                calls.push(parse_gemma_call_parts(name, args_raw, tools)?);
-                gap_start = start + consumed;
-                scan = start + consumed;
-            }
-            // This start marker did not resolve to a complete call (e.g. no end
-            // marker yet, or an invalid name); leave it in the current gap and
-            // keep scanning past the marker. It is handled by span recovery / the
-            // no-leak markup drop below.
-            None => scan = start + TOOL_CALL_START.len(),
-        }
-    }
-
-    recover_calls_in_span(
-        &message[gap_start..],
-        gap_start,
-        true,
-        tools,
-        &mut calls,
-        &mut first_tool_start,
-        &mut removed_spans,
-    )?;
-
-    // `normal_text` assembly:
-    //   - Success path (≥1 call extracted): concatenate the text outside every
-    //     complete tool-call block — prefix, inter-call narration, and trailing
-    //     narration — preserving whitespace verbatim. A gap that still contains
-    //     gemma4 markup tokens (`<|tool_call>`, `<tool_call|>`, `<|"|>`) is a
-    //     malformed / truncated / unrecoverable remnant; it is dropped so
-    //     tool-call markup never leaks into normal_text.
-    //   - Recovery path (zero calls extracted): if the message contains ANY
-    //     gemma4 markup token, return empty — Dynamo intentionally diverges
-    //     from vLLM's exception-fallback (which echoes raw bytes) so tool-call
-    //     markup never leaks on malformed / truncated / orphan-close / no-body
-    //     inputs. Cases flagged by the parity table's `↯`:
-    //     TOOLCALLING.batch.{4.a, 4.b, 4.c, 4.d, 5.a, 5.b, 5.c, 6.c}.
-    //   - Plain-text path (zero calls AND no markup): return the message as-is.
-    let has_markup = message.contains(TOOL_CALL_START)
-        || message.contains(TOOL_CALL_END)
-        || message.contains(STRING_DELIM);
-    let normal_text = if calls.is_empty() {
-        if has_markup {
-            // Recovery: malformed/truncated/orphan-close/no-body shapes.
-            // Suppress the whole message so tool-call markup doesn't leak.
-            let preview: String = message.chars().take(120).collect();
-            tracing::warn!(
-                why = "no_calls_with_markup",
-                stripped_bytes = message.len(),
-                has_start = message.contains(TOOL_CALL_START),
-                has_end = message.contains(TOOL_CALL_END),
-                has_string_delim = message.contains(STRING_DELIM),
-                "gemma4 strip (recovery): zero calls extracted but gemma4 markup present (<|tool_call>, <tool_call|>, <|\"|>); suppressing entire message to prevent leak into normal_text. preview={:?}",
-                preview
-            );
-            String::new()
-        } else {
-            // No markup at all → plain text passes through unchanged. No strip.
-            message.trim().to_string()
-        }
-    } else {
-        // Success: keep every gap between/around the complete tool-call blocks.
-        removed_spans.sort_unstable();
-        let mut kept = String::new();
-        let mut prev_end = 0usize;
-        for &(start, end) in &removed_spans {
-            // Spans are non-overlapping and sorted; guard against any pathological
-            // overlap so we never slice on a stale offset.
-            if start >= prev_end {
-                push_natural_text_gap(&mut kept, &message[prev_end..start]);
-            }
-            prev_end = prev_end.max(end);
-        }
-        push_natural_text_gap(&mut kept, &message[prev_end..]);
-        // Trim only the outermost ends (interior whitespace stays verbatim) to
-        // match the dynamo normal_text convention used across this family.
-        kept.trim().to_string()
+) -> anyhow::Result<Option<ToolCallResponse>> {
+    let allow_missing_start = !invoke.starts_with(TOOL_CALL_START);
+    let Some((name, args_raw, _)) = parse_recoverable_call_at(invoke, allow_missing_start, true)
+    else {
+        return Ok(None);
     };
-
-    Ok((calls, Some(normal_text)))
-}
-
-/// Append a single inter-call / surrounding gap to the accumulated normal_text.
-/// A gap that still contains gemma4 tool-call markup is a malformed / truncated
-/// remnant (e.g. an incomplete trailing call that never closed) — drop it so
-/// markup never leaks. Natural text is appended verbatim, whitespace included.
-fn push_natural_text_gap(kept: &mut String, gap: &str) {
-    if gap.is_empty() {
-        return;
-    }
-    if gap.contains(TOOL_CALL_START) || gap.contains(TOOL_CALL_END) || gap.contains(STRING_DELIM) {
-        let preview: String = gap.chars().take(120).collect();
-        tracing::warn!(
-            why = "dropped_markup_gap",
-            stripped_bytes = gap.len(),
-            "gemma4 strip (success): dropped a gap that still contained gemma4 markup (malformed/truncated remnant) to prevent leak into normal_text. preview={:?}",
-            preview
-        );
-        return;
-    }
-    kept.push_str(gap);
+    parse_gemma_call_parts(name, args_raw, tools).map(Some)
 }
 
 // ---------------------------------------------------------------------------
@@ -752,20 +531,63 @@ mod tests {
     /// scanner ignores the terminator while `in_string`.
     #[test]
     fn end_marker_sequence_inside_string_arg_does_not_truncate() {
-        let message = "before <|tool_call>call:doc{note:<|\"|>use }<tool_call|> to end<|\"|>}<tool_call|> after";
+        let call = "<|tool_call>call:doc{note:<|\"|>use }<tool_call|> to end<|\"|>}<tool_call|>";
+        let message = format!("{call} after");
 
-        let (calls, normal_text) = try_tool_call_parse_gemma4(message, None).unwrap();
+        // The resolved end must cover the ENTIRE call block (start marker through
+        // the REAL end marker), so the scanner strips exactly the markup and the
+        // prose that follows survives as text.
+        let end = find_leading_tool_call_end_gemma4(&message, false).expect("complete call");
+        assert_eq!(&message[..end], call);
+        assert_eq!(&message[end..], " after");
 
-        assert_eq!(calls.len(), 1, "exactly one complete call");
-        assert_eq!(calls[0].function.name, "doc");
         // Arguments must be COMPLETE — the embedded `}<tool_call|>` stays inside
         // the string value rather than terminating the call early.
+        let parsed = parse_one_tool_call_gemma4(&message[..end], None)
+            .unwrap()
+            .expect("one call");
+        assert_eq!(parsed.function.name, "doc");
         assert_eq!(
-            calls[0].function.arguments,
+            parsed.function.arguments,
             r#"{"note":"use }<tool_call|> to end"}"#
         );
-        // Removal span must cover the ENTIRE call block (start marker through the
-        // real end marker), so surrounding prose survives and no markup leaks.
-        assert_eq!(normal_text.as_deref(), Some("before  after"));
+    }
+
+    /// End of stream with a balanced body and no close marker: recoverable (case
+    /// `5.b`), and only at flush — mid-stream the scanner must keep accumulating
+    /// rather than cut the call at the first plausible spot.
+    #[test]
+    fn a_body_missing_its_close_marker_resolves_only_at_flush() {
+        let body = "call:get_weather{city:<|\"|>Paris<|\"|>}";
+        assert_eq!(find_leading_tool_call_end_gemma4(body, false), None);
+        assert_eq!(
+            find_leading_tool_call_end_gemma4(body, true),
+            Some(body.len())
+        );
+        assert_eq!(
+            parse_one_tool_call_gemma4(body, None)
+                .unwrap()
+                .expect("recovered")
+                .function
+                .arguments,
+            r#"{"city":"Paris"}"#
+        );
+    }
+
+    /// Text that merely contains the WORD `call:` is not a call, at flush or
+    /// otherwise — otherwise ordinary prose is buffered and then dropped at EOF.
+    #[test]
+    fn prose_containing_the_word_call_is_not_a_leading_call() {
+        for flush in [false, true] {
+            assert_eq!(
+                find_leading_tool_call_end_gemma4("call: you tomorrow", flush),
+                None
+            );
+        }
+        assert!(
+            parse_one_tool_call_gemma4("call: you tomorrow", None)
+                .unwrap()
+                .is_none()
+        );
     }
 }

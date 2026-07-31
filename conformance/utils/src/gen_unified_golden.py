@@ -43,10 +43,12 @@ GRAMMAR_NOTE = {
 
 # --- grammar renderers: one semantic segment -> that family's raw text --------
 
+REASON_OPEN = {"gemma4": "<|channel>thought\n", "qwen3": "<think>", "kimi_k2": "<think>"}
+REASON_CLOSE = {"gemma4": "<channel|>", "qwen3": "</think>", "kimi_k2": "</think>"}
+
+
 def r_reason(fam, text):
-    if fam == "gemma4":
-        return f"<|channel>thought\n{text}<channel|>"
-    return f"<think>{text}</think>"
+    return f"{REASON_OPEN[fam]}{text}{REASON_CLOSE[fam]}"
 
 
 def r_tool(fam, name, key, val, idx):
@@ -96,6 +98,19 @@ M = {"verdict": "match"}
 
 def D(cls, note):
     return {"verdict": "diverge", "class": cls, "note": note}
+
+
+def SPLIT(cls, note):
+    """Dynamo expectation for a scenario the SPLIT path gets wrong.
+
+    A family on the unified parser matches; one still chained through v1
+    reasoning + v2 tool diverges. Written as ONE rule rather than per family so
+    porting a family updates `UNIFIED_FAMILIES` and nothing else — when qwen3
+    joined, its per-case annotations were left claiming MERGE and stayed wrong
+    for a whole release, because the Dynamo column is computed LIVE and nothing
+    reads this field back.
+    """
+    return {fam: (M if fam in UNIFIED_FAMILIES else D(cls, note)) for fam in FAMILIES}
 
 
 # --- per-family input helpers for EDGE scenarios ------------------------------
@@ -179,6 +194,12 @@ def guided_surroundings(render, dynamo_note, fill=None):
     }
 
 
+def by_family(render, vllm, dynamo, *rest):
+    """`render(fam) -> input` for the scenarios where only the reasoning envelope
+    around an otherwise identical payload is grammar-specific."""
+    return {fam: (render(fam), vllm, dynamo, *rest) for fam in FAMILIES}
+
+
 # Guided payloads, written once. `named` is what a NAMED choice emits (that
 # tool's arguments alone); the arrays are what a REQUIRED choice emits.
 GUIDED_NAMED_ARGS = '{"city": "Paris"}'
@@ -214,29 +235,29 @@ CLEAN = [
      "Reasoning AFTER a tool call, then final text (Example A). The split cannot represent reasoning between the call and the answer.",
      [], [("reason", "Look it up."), ("tool", "get_weather", "city", "Paris"),
           ("reason", "Now answer."), ("text", "It's 18C.")],
-     M, D("MERGE", "v1 reasoning runs over the whole stream first -> both think spans merge into one event ahead of the tool_call")),
+     M, SPLIT("MERGE", "v1 reasoning runs over the whole stream first -> both think spans merge into one event ahead of the tool_call")),
 
     ("content_then_reason",
      "Visible content, then reasoning, then more content. The split hoists reasoning to the front and merges the two content spans.",
      [], [("text", "Hello there. "), ("reason", "let me recall"), ("text", "The capital is Paris.")],
-     M, D("ORDER", "reasoning hoisted ahead of leading content; the two text spans merge")),
+     M, SPLIT("ORDER", "reasoning hoisted ahead of leading content; the two text spans merge")),
 
     ("content_then_reason_then_tool",
      "Visible content BEFORE reasoning, then a tool call. The split hoists all reasoning to the front, so content-before-reasoning loses order.",
      [], [("text", "Sure, one sec. "), ("reason", "checking the forecast"),
           ("tool", "get_weather", "city", "Paris")],
-     M, D("ORDER", "reasoning hoisted ahead of the leading content")),
+     M, SPLIT("ORDER", "reasoning hoisted ahead of the leading content")),
 
     ("reason_interleaved",
      "reason -> tool -> reason -> tool. Two calls, each preceded by its own thought.",
      [], [("reason", "A"), ("tool", "f", "x", "1"), ("reason", "B"), ("tool", "g", "y", "2")],
-     M, D("MERGE", "both think spans merge up front, ahead of both calls")),
+     M, SPLIT("MERGE", "both think spans merge up front, ahead of both calls")),
 
     ("reason_tool_text_reason_tool",
      "reason -> tool -> text -> reason -> tool. Two reasoning spans separated by a call and text.",
      [], [("reason", "A"), ("tool", "f", "x", "1"), ("text", "working on it"),
           ("reason", "B"), ("tool", "g", "y", "2")],
-     M, D("MERGE", "reasoning A and B merge up front; the second reasoning span loses its position")),
+     M, SPLIT("MERGE", "reasoning A and B merge up front; the second reasoning span loses its position")),
 
     ("trailing_text_after_tool",
      "Arbitrary visible prose AFTER the tool call (the point is it could be ANY content, so it must survive). Policy P1 (best-effort recovery) — trailing model text is preserved, not suppressed.",
@@ -288,23 +309,23 @@ CLEAN = [
      "Two reasoning spans separated by visible text, no tool call. Streaming keeps both spans in order; batch merges them. This is also covered in: REASONING.batch.6.a.",
      [], [("reason", "first thought"), ("text", "interlude "),
           ("reason", "second thought"), ("text", "done")],
-     M, D("MERGE", "batch v1 reasoning merges both spans into one leading event")),
+     M, SPLIT("MERGE", "batch v1 reasoning merges both spans into one leading event")),
 
     # --- Group 11: reasoning <-> tool interleaving (UNIQUE to unified) ---
     ("reason_tool_reason_tool_reason",
      "reason -> tool -> reason -> tool -> reason. Three reasoning spans around two calls, including reasoning AFTER the last call — the split cannot place any of them.",
      [], [("reason", "A"), ("tool", "f", "x", "1"), ("reason", "B"),
           ("tool", "g", "y", "2"), ("reason", "C")],
-     M, D("MERGE", "batch v1 reasoning merges A+B+C into one event ahead of both calls")),
+     M, SPLIT("MERGE", "batch v1 reasoning merges A+B+C into one event ahead of both calls")),
     ("reason_between_calls",
      "Reasoning BETWEEN two tool calls with no surrounding text — the tightest interleave.",
      [], [("tool", "f", "x", "1"), ("reason", "mid"), ("tool", "g", "y", "2")],
-     M, D("MERGE", "batch v1 hoists the mid-call reasoning ahead of both calls")),
+     M, SPLIT("MERGE", "batch v1 hoists the mid-call reasoning ahead of both calls")),
     ("text_reason_tool_text_reason_tool",
      "Deep well-formed interleave — visible text, reasoning, and tool calls alternating (text -> reason -> tool -> text -> reason -> tool). Every segment must survive in emitted order; the point is that user text, reasoning, and calls all mix in one stream.",
      [], [("text", "Sure. "), ("reason", "check A"), ("tool", "f", "x", "1"),
           ("text", " and "), ("reason", "check B"), ("tool", "g", "y", "2")],
-     M, D("MERGE", "batch v1 reasoning hoists both think spans ahead of everything; the interleaved text/call order collapses")),
+     M, SPLIT("MERGE", "batch v1 reasoning hoists both think spans ahead of everything; the interleaved text/call order collapses")),
 ]
 
 
@@ -319,7 +340,7 @@ EDGE = [
      {"starting_state": "None", "tool_output_mode": "Native", "named_tool": None},
      {
         "gemma4": ("<|channel>thought\nok<channel|><|tool_call>call:get_weather{city:<|\"|>Par",
-                   D("ERROR", "native Gemma4UnifiedParser finish() returns a hard Err -> erroring is the opposite of best-effort recovery"),
+                   D("ERROR", "CONFIRMED by live 0.25.1 capture: the native Rust Gemma4UnifiedParser returns `ParsingFailed { message: \"incomplete Gemma4 tool call\" }` — erroring is the opposite of best-effort recovery. vLLM PYTHON does not error here; it dispatches the partial call with truncated arguments (`{city: \"Par\"}`), which is worse for a side-effecting action"),
                    {"verdict": "match", "note": "P2: drop the partial trailing call, keep the preceding reasoning, never error/leak (TOOLCALLING.batch.5.e)"}),
         "qwen3": ("<think>ok</think><tool_call>\n<function=get_weather>\n<parameter=city>\nPar",
                   {"verdict": "match", "note": "P2: drop the unterminated call and keep the preceding reasoning"},
@@ -371,7 +392,7 @@ EDGE = [
      {
         "gemma4": ("I will check that. <tool_call|>",
                    D("LEAK", "vLLM/SGLang leak the orphan close marker into content as the whole tail (TOOLCALLING_CASES.md 5.g)"),
-                   D("LEAK", "LIVE finding: v2 gemma4 leaks a lone <tool_call|> end marker into content — with no matching <|tool_call> open the scanner treats it as text. Best-effort-recovery gap (should strip per TOOLCALLING 5.g).")),
+                   {"verdict": "match", "note": "the shared scanner strips a lone <tool_call|> with nothing open (TOOLCALLING 5.g); the split path leaked it as text"}),
         "qwen3": ("I will check that. </tool_call>",
                   {"verdict": "match", "note": "the orphan close is stripped and the preceding prose remains visible"},
                   {"verdict": "match", "note": "the orphan close is stripped and the preceding prose remains visible"}),
@@ -402,7 +423,7 @@ EDGE = [
                    {"verdict": "match", "note": "body complete; recover the call at finish"}),
         "qwen3": ("<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>",
                   {"verdict": "match", "note": "body complete; recover at finish"},
-                  D("DROP", "the complete call body produces no events when the outer close is absent")),
+                  SPLIT("DROP", "the complete call body produces no events when the outer close is absent")["qwen3"]),
         "kimi_k2": ("<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"city\": \"Paris\"}",
                     {"verdict": "match", "note": "body complete; recover at finish"},
                     D("DROP", "the complete call body produces no events when the outer close is absent")),
@@ -417,11 +438,11 @@ EDGE = [
      {
         "gemma4": ("<|tool_call>call:log{note:<|\"|><|channel>thought\nreconsider<channel|><|\"|>}<tool_call|>",
                    D("ARG_MISMATCH", "the reasoning extractor lifts the `<|channel>...<channel|>` out of the arg value before tool parsing, so the logged note no longer matches golden"),
-                   D("MERGE", "v1 reasoning runs first over the whole stream and pulls the arg's embedded `<|channel>...<channel|>` into a leading reasoning event, corrupting the tool arg"),
+                   {"verdict": "match", "note": "I7: once the tool block is open the in-block scan never looks for `<|channel>`, so the arg survives byte-exact — role label included"},
                    "<|channel>thought\nreconsider<channel|>"),
         "qwen3": ("<tool_call>\n<function=log>\n<parameter=note>\n<think>reconsider</think>\n</parameter>\n</function>\n</tool_call>",
                   D("ARG_MISMATCH", "captured: tool_call(log) — the `<think>...</think>` inside the parameter value is extracted as reasoning first, corrupting the arg"),
-                  D("MERGE", "captured: tool_call(log) — v1 reasoning lifts the embedded `<think>` out of the arg"),
+                  SPLIT("MERGE", "v1 reasoning lifts the embedded `<think>` out of the arg")["qwen3"],
                   "<think>reconsider</think>"),
         "kimi_k2": ("<|tool_calls_section_begin|><|tool_call_begin|>functions.log:0<|tool_call_argument_begin|>{\"note\": \"<think>reconsider</think>\"}<|tool_call_end|><|tool_calls_section_end|>",
                     D("ARG_MISMATCH", "captured: reasoning(reconsider) | text(Logging now: ) | tool_call(log) | text( done.) — the `<think>` inside the JSON string arg is extracted as reasoning first, corrupting the arg"),
@@ -439,10 +460,10 @@ EDGE = [
      {
         "gemma4": ("<|channel>thought\nI should check. <|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|> now answer<channel|>",
                    D("LEAK", "the reasoning extractor consumes to `<channel|>`, so the nested `<|tool_call>...<tool_call|>` leaks into reasoning_content and the call is dropped; break-out recovery not implemented"),
-                   D("LEAK", "v1 reasoning runs to `<channel|>`, swallowing the nested tool markup into one reasoning event; the call is lost")),
+                   {"verdict": "match", "note": "I3: the scanner breaks out of the thought at the tool opener, emits the call, and resumes reasoning after its close"}),
         "qwen3": ("<think>I should check. <tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call> now answer</think>",
                   D("LEAK", "captured: reasoning(I should check. ) | tool_call(get_weather) | reasoning( now answer) — the `</think>` closes only after the nested call, so the tool markup leaks into reasoning and the call is dropped"),
-                  D("LEAK", "captured: text(Sure. ) | reasoning(I should check. ) | tool_call(get_weather) | reasoning( now answer) | text( Here you go.) — v1 reasoning consumes to `</think>`, leaking the nested tool markup")),
+                  SPLIT("LEAK", "v1 reasoning consumes to `</think>`, leaking the nested tool markup")["qwen3"]),
         "kimi_k2": ("<think>I should check. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"city\": \"Paris\"}<|tool_call_end|><|tool_calls_section_end|> now answer</think>",
                     D("LEAK", "captured: reasoning(I should check. ) | tool_call(get_weather) | text( now answer</think>) — the tool section nested in `<think>...</think>` leaks into reasoning and the call is dropped"),
                     D("LEAK", "captured: reasoning(I should check. ) | text(Sure. ) | tool_call(get_weather) | text( now answer</think> Here you g) — v1 reasoning consumes to `</think>`, leaking the nested section")),
@@ -458,11 +479,11 @@ EDGE = [
      {
         "gemma4": ("Logging now: <|tool_call>call:log{note:<|\"|><|channel>thought\nreconsider<channel|><|\"|>}<tool_call|> done.",
                    D("ARG_MISMATCH", "the reasoning extractor lifts the `<|channel>...<channel|>` out of the arg before tool parsing; the note no longer matches and the surrounding text can shift"),
-                   D("MERGE", "v1 reasoning hoists the arg's embedded `<|channel>...<channel|>` ahead of the visible text and corrupts the tool arg"),
+                   {"verdict": "match", "note": "I7 plus surrounding text: the arg stays byte-exact and both prose spans keep their positions"},
                    "<|channel>thought\nreconsider<channel|>"),
         "qwen3": ("Logging now: <tool_call>\n<function=log>\n<parameter=note>\n<think>reconsider</think>\n</parameter>\n</function>\n</tool_call> done.",
                   D("ARG_MISMATCH", "captured: text(Logging now: ) | tool_call(log) | text( done.) — the `<think>` inside the parameter value is extracted as reasoning first, corrupting the arg"),
-                  D("MERGE", "captured: text(Logging now: ) | tool_call(log) | text( done.) — v1 reasoning lifts the embedded `<think>` out of the arg and ahead of the text"),
+                  SPLIT("MERGE", "v1 reasoning lifts the embedded `<think>` out of the arg and ahead of the text")["qwen3"],
                   "<think>reconsider</think>"),
         "kimi_k2": ("Logging now: <|tool_calls_section_begin|><|tool_call_begin|>functions.log:0<|tool_call_argument_begin|>{\"note\": \"<think>reconsider</think>\"}<|tool_call_end|><|tool_calls_section_end|> done.",
                     D("ARG_MISMATCH", "captured: reasoning(reconsider) | text(Logging now: ) | tool_call(log) | text( done.) — the `<think>` inside the JSON string arg is extracted as reasoning first, corrupting the arg"),
@@ -482,10 +503,10 @@ EDGE = [
      {
         "gemma4": ("Sure. <|channel>thought\nI should check. <|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|> now answer<channel|> Here you go.",
                    D("LEAK", "the reasoning extractor consumes to `<channel|>`, leaking the nested tool markup into reasoning_content and dropping the call; the visible text survives on both sides"),
-                   D("LEAK", "v1 reasoning runs to `<channel|>`, swallowing the nested tool markup; the call is lost")),
+                   {"verdict": "match", "note": "I3 with narration on both sides: break out, emit the call, resume the thought, and keep both text spans"}),
         "qwen3": ("Sure. <think>I should check. <tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call> now answer</think> Here you go.",
                   D("LEAK", "captured: text(Sure. ) | reasoning(I should check. ) | tool_call(get_weather) | reasoning( now answer) | text( Here you go.) — `</think>` closes only after the nested call, so the tool markup leaks into reasoning and the call is dropped"),
-                  D("LEAK", "captured: text(Sure. ) | reasoning(I should check. ) | tool_call(get_weather) | reasoning( now answer) | text( Here you go.) — v1 reasoning consumes to `</think>`, leaking the nested tool markup")),
+                  SPLIT("LEAK", "v1 reasoning consumes to `</think>`, leaking the nested tool markup")["qwen3"]),
         "kimi_k2": ("Sure. <think>I should check. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"city\": \"Paris\"}<|tool_call_end|><|tool_calls_section_end|> now answer</think> Here you go.",
                     D("LEAK", "captured: reasoning(I should check. ) | text(Sure. ) | tool_call(get_weather) | text( now answer</think> Here you g) — the nested tool section leaks into reasoning and the call is dropped"),
                     D("LEAK", "captured: reasoning(I should check. ) | text(Sure. ) | tool_call(get_weather) | text( now answer</think> Here you g) — v1 reasoning consumes to `</think>`, leaking the nested section")),
@@ -746,13 +767,14 @@ EDGE = [
       {"kind": "tool_call", "name": "get_weather", "arguments": {"city": "Paris"}}],
      {"starting_state": "Reasoning", "tool_output_mode": "GuidedJson", "named_tool": None},
      {"finish_reason": "stop"},
-     {
-        "qwen3": ("checking weather</think>[{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}]",
-                  D("UNSUPPORTED", "vLLM base case doesn't set a starting channel state or use guided JSON"),
-                  {"verdict": "match", "note": "Dynamo v2 unified parser with starting_state=Reasoning and tool_output_mode=GuidedJson{named_tool=None}"}),
-        "gemma4": ("checking weather<channel|><|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|>", M, M),
-        "kimi_k2": ("checking weather</think><|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"city\": \"Paris\"}<|tool_call_end|><|tool_calls_section_end|>", M, M),
-     }),
+     # The payload is grammar-independent; only the reasoning envelope the model
+     # closes before it belongs to the family. Deriving it per family is what keeps
+     # this case honest for gemma4 and kimi_k2: hardcoding qwen3's guided JSON beside
+     # the OTHER families' native markup graded them against output guided decoding
+     # never produces.
+     by_family(lambda fam: f"checking weather{REASON_CLOSE[fam]}{GUIDED_ONE_CALL}",
+               D("UNSUPPORTED", "vLLM base case doesn't set a starting channel state or use guided JSON"),
+               {"verdict": "match", "note": "Dynamo v2 unified parser with starting_state=Reasoning and tool_output_mode=GuidedJson{named_tool=None}"})),
 
     ("prefilled_response_with_tool",
      "Response channel is pre-filled (the prompt opened visible content), so the stream skips reasoning entirely: the leading `output` is visible CONTENT with no opening marker, then a native-XML tool call. The leading text is generated output and must surface as a text event — routing it to reasoning is the regression, and it is what a reasoning-first split does when nothing told it the response channel was already open. Parses identically under starting_state=None (compare 8.a `text_before_tool`) — no reasoning markers here, so Response has nothing to suppress; 50.d is the case that isolates it.",
@@ -796,7 +818,7 @@ EDGE = [
      {"finish_reason": "length"},
      {
         "gemma4": ("analyzing data<channel|><|tool_call>call:get_weather{city:<|\"|>Par",
-                   D("ERROR", "native Gemma4UnifiedParser finish() returns a hard Err on a partial call rather than recovering"),
+                   D("ERROR", "CONFIRMED by live 0.25.1 capture: `ParsingFailed { message: \"incomplete Gemma4 tool call\" }` on a partial call rather than recovering"),
                    {"verdict": "match", "note": "P2: drop the partial trailing call, keep the prefilled reasoning"}),
         "qwen3": ("analyzing data</think><tool_call>\n<function=get_weather>\n<parameter=city>\nPar",
                   {"verdict": "match", "note": "P2: drop the unterminated call and keep prefilled output"},
@@ -865,7 +887,7 @@ EDGE = [
      {"finish_reason": "length"},
      {
         "gemma4": ("Working on it... <|tool_call>call:get_weather{city:<|\"|>Par",
-                   D("ERROR", "native Gemma4UnifiedParser finish() returns a hard Err on a partial call rather than recovering"),
+                   D("ERROR", "CONFIRMED by live 0.25.1 capture: `ParsingFailed { message: \"incomplete Gemma4 tool call\" }` on a partial call rather than recovering"),
                    {"verdict": "match", "note": "P2: keep the leading visible prose, drop the partial call"}),
         "qwen3": ("Working on it... <tool_call>\n<function=get_weather>\n<parameter=city>\nPar",
                   {"verdict": "match", "note": "P2: keep leading prose and drop the unterminated call"},

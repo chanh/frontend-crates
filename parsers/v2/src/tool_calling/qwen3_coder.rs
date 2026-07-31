@@ -51,6 +51,7 @@ fn spec() -> WrappedBlockSpec {
         bare_recovery_latch: BareRecoveryLatch::Set,
         invoke_latch: InvokeLatch::IfEmitted,
         drop_invoke_crossing_block_end: false,
+        invoke_scan: None,
     }
 }
 

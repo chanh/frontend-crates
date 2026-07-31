@@ -42,6 +42,16 @@ struct GoldenCase {
     /// identically; see that type for why it is declared and not inferred.
     #[serde(default)]
     init: Init,
+    /// Per-engine documentation of the expected outcome. Only `vllm` is read by
+    /// a harness (`unified_render` draws it); `dynamo` is prose, which is why the
+    /// test below has to pin it.
+    #[serde(default)]
+    expect: BTreeMap<String, Expect>,
+}
+
+#[derive(Deserialize)]
+struct Expect {
+    verdict: String,
 }
 
 /// Tool schemas the corpus is written against (string params, so a value like
@@ -364,5 +374,39 @@ fn manifest_and_parser_registry_agree_on_native_families() {
         wrong.is_empty(),
         "manifest/registry disagree:\n  {}",
         wrong.join("\n  ")
+    );
+}
+
+/// The corpus's `expect.dynamo` is DOCUMENTATION — the Dynamo column is computed
+/// live, so no harness reads this field back and it rots in silence. It already
+/// did: qwen3's annotations still claimed `MERGE` a release after it went
+/// unified, describing a code path that family had stopped taking.
+///
+/// Tie it to the gate above, which is the only thing that makes it checkable: a
+/// family whose every case matches the golden cannot also be annotated as
+/// diverging from it. Porting a family then has exactly one place to update
+/// (`native:` in the `unified:` row of `parser_families.yaml`), and forgetting fails here.
+#[test]
+fn a_unified_family_is_never_annotated_as_diverging() {
+    let mut stale = Vec::new();
+    for file in load_golden()
+        .iter()
+        .filter(|f| has_unified_parser(&f.family))
+    {
+        for (id, case) in &file.cases {
+            if let Some(expect) = case.expect.get("dynamo")
+                && expect.verdict != "match"
+            {
+                stale.push(format!("{id}: expect.dynamo = {:?}", expect.verdict));
+            }
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "{} case(s) of a UNIFIED family still document a Dynamo divergence, but \
+         `unified_parser_matches_the_golden_oracle` proves they match. Update \
+         UNIFIED_FAMILIES in gen_unified_golden.py:\n\n{}",
+        stale.len(),
+        stale.join("\n"),
     );
 }

@@ -236,7 +236,14 @@ pub fn unified_family(corpus_name: &str) -> UnifiedFamily {
 /// the input text, and the copies could disagree with each other and with the `init:`
 /// the popup displayed — a case could declare `tool_output_mode=GuidedJson` and be
 /// parsed as `Native` because its input did not happen to start with `[`.
+///
+/// `deny_unknown_fields` because `#[serde(default)]` on a RENAMED key is silent:
+/// a shard captured before `prefill` became `starting_state` deserializes with
+/// every field defaulted, so every case runs as `starting_state=None` and the
+/// prefilled-channel groups (40.x/50.x) quietly produce the wrong events while
+/// the suite still reports a pass. An unknown key is a stale shard — say so.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Init {
     #[serde(default)]
     pub starting_state: String,

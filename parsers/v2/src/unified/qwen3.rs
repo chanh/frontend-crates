@@ -47,6 +47,8 @@ pub(crate) fn qwen3_unified(tools: &[Tool]) -> Box<dyn UnifiedParser> {
         qwen3_scanner(tools).with_reasoning(ReasoningSpec {
             start: REASONING_START,
             end: REASONING_END,
+            // `<think>` carries no role label; the thought starts immediately.
+            start_label: None,
             // Qwen3 emits its own `<think>`; the template does not pre-fill one,
             // so the stream starts in visible content (policy P5).
             forced_start: false,
