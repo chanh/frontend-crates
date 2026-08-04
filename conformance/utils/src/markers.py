@@ -37,7 +37,12 @@ from impls import (
 _STREAM_MODE_MARKER = "s"
 _BATCH_MODE_MARKER = "b"
 VLLM_RUST_UNAVAILABLE = (
-    "vLLM Rust source not available; set VLLM_RUST_SOURCE and run the Rust capture probe."
+    # Absence of a `vllm_rust` key says the entry is missing; it does NOT say WHY.
+    # This used to assert "source not available; go run the capture", which sent a
+    # reader after data that cannot exist: vLLM 0.23.0 has no Rust harmony/inkling
+    # parser at all, and 92 cells carried that instruction with nothing to capture.
+    "no vLLM Rust entry recorded for this case — either the capture was not run "
+    "(set VLLM_RUST_SOURCE) or that build has no Rust parser for this family."
 )
 
 _IMPL_DISPLAY = IMPL_DISPLAY
