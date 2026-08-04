@@ -658,7 +658,14 @@ def test_template_has_compare_picker_and_reasoning_candidates() -> None:
 def test_template_overview_cells_do_not_expand_from_hidden_marker_text() -> None:
     # Static styles now live in the CSS asset, inlined at render (audit B7).
     css = (SRC / "assets" / "conformance.css").read_text()
-    assert "td.cell { position: relative; text-align: center; width: 44px; min-width: 44px; max-width: 44px;" in css
+    # The guard is that width is PINNED on all three properties so hidden marker
+    # text cannot expand a cell — not the specific number, which is a layout
+    # choice (44px -> 26px once the unified tab reached 240 case columns).
+    m = re.search(
+        r"td\.cell \{ position: relative; text-align: center; "
+        r"width: (\d+)px; min-width: \1px; max-width: \1px;", css)
+    assert m, "td.cell must pin width/min-width/max-width to the SAME value"
+    assert 16 <= int(m.group(1)) <= 60, f"implausible cell width {m.group(1)}px"
     assert ".view-overview td.cell { font-size: 0; line-height: 0; }" in css
     assert ".view-overview td.cell .cell-marker { display: none; }" in css
     assert ".view-overview td.cell .ttip { font-size: 12px; line-height: 1.4; }" in css

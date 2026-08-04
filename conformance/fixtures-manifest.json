@@ -1,6 +1,6 @@
 {
-  "snapshot": "20260804_113511",
-  "created_pt": "2026-08-04 11:35:11 America/Los_Angeles",
+  "snapshot": "20260804_123426",
+  "created_pt": "2026-08-04 12:34:26 America/Los_Angeles",
   "crates": {
     "dynamo-parsers": "7.0.1",
     "dynamo-parsers-v2": "0.1.25"
@@ -176,9 +176,14 @@
       "size": 4363
     },
     {
+      "path": "unified/sglang_python-0.5.16.tar.gz",
+      "sha256": "5ab73d9c6b21c759666d5191f61775c01f32646e7db502728906694ad32f37f3",
+      "size": 8170
+    },
+    {
       "path": "unified/vllm_python-0.25.1.tar.gz",
-      "sha256": "950ee501ef12f4168bc3f2fb7742f269d8f631fbe20cfe5df9bec960f38b719d",
-      "size": 6745
+      "sha256": "d42cce6f7835f2f45ce00374de7bcbf483eb469a337d4ca041d8c2cd45d51daf",
+      "size": 9137
     },
     {
       "path": "unified/vllm_rust-0.25.1.tar.gz",
