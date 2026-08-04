@@ -335,6 +335,67 @@ mod tests {
     const GUIDED_CALL: &str = r#"[{"name": "get_weather", "arguments": {"city": "Paris"}}]"#;
 
     #[test]
+    fn a_complete_guided_call_is_emitted_by_the_push_that_completes_it() {
+        for split in 0..GUIDED_CALL.len() {
+            let mut parser = qwen3_unified(&weather_tools());
+            parser
+                .initialize_with_output_mode(
+                    UnifiedParserStartingState::None,
+                    UnifiedToolOutputMode::GuidedJson { named_tool: None },
+                )
+                .unwrap();
+
+            let mut before = parser.push(&GUIDED_CALL[..split]).unwrap();
+            assert!(
+                before
+                    .iter()
+                    .all(|delta| !matches!(delta, UnifiedDelta::ToolCall(_))),
+                "call emitted before its JSON value completed at split {split}"
+            );
+            let completing = parser.push(&GUIDED_CALL[split..]).unwrap();
+            assert!(
+                completing
+                    .iter()
+                    .any(|delta| matches!(delta, UnifiedDelta::ToolCall(_))),
+                "completing push buffered the call until finish at split {split}"
+            );
+            before.extend(completing);
+            let finished = parser.finish().unwrap();
+            assert!(
+                finished.is_empty(),
+                "finish re-emitted data at split {split}"
+            );
+            assert_eq!(
+                assemble(&before),
+                vec![call("get_weather", serde_json::json!({"city": "Paris"}))],
+                "split {split}"
+            );
+        }
+    }
+
+    #[test]
+    fn syntax_after_a_completed_guided_payload_keeps_order_at_every_split() {
+        let input = format!("{GUIDED_CALL} \t</tool_call><think>after</think><function=orphan>");
+        let want = vec![
+            call("get_weather", serde_json::json!({"city": "Paris"})),
+            reasoning("after"),
+        ];
+        for split in 0..=input.len() {
+            let chunks = [&input[..split], &input[split..]];
+            assert_eq!(
+                configured_events(
+                    &weather_tools(),
+                    UnifiedParserStartingState::None,
+                    UnifiedToolOutputMode::GuidedJson { named_tool: None },
+                    &chunks,
+                ),
+                want,
+                "split {split}"
+            );
+        }
+    }
+
+    #[test]
     fn a_required_choice_call_with_non_object_arguments_is_voided_like_the_named_path() {
         // The named path already rejects a payload that is not a JSON object. A
         // required-choice ELEMENT has the same wire contract, so `"just a string"`
@@ -1162,14 +1223,16 @@ mod tests {
             .unwrap();
         let mut deltas = parser.push(input).unwrap();
         deltas.extend(parser.finish().unwrap());
-        let call = deltas
+        let arguments = deltas
             .iter()
-            .find_map(|delta| match delta {
-                UnifiedDelta::ToolCall(call) => Some(call),
+            .filter_map(|delta| match delta {
+                UnifiedDelta::ToolCall(call) if call.tool_index == 0 => {
+                    Some(call.arguments.as_str())
+                }
                 _ => None,
             })
-            .expect("guided call");
-        assert_eq!(call.arguments, input);
+            .collect::<String>();
+        assert_eq!(arguments, input);
     }
 
     #[test]
@@ -1405,8 +1468,8 @@ mod guided_warning_tests {
                 UnifiedToolOutputMode::GuidedJson { named_tool: None },
             )
             .unwrap();
-            p.push(payload).unwrap();
-            let out = p.finish().unwrap();
+            let mut out = p.push(payload).unwrap();
+            out.extend(p.finish().unwrap());
             // recovered as text, no call dispatched
             assert!(
                 out.iter().all(|d| !matches!(d, UnifiedDelta::ToolCall(_))),
@@ -1661,8 +1724,8 @@ mod reset_and_payload_tests {
                 },
             )
             .unwrap();
-            p.push(payload).unwrap();
-            let out = p.finish().unwrap();
+            let mut out = p.push(payload).unwrap();
+            out.extend(p.finish().unwrap());
             assert!(
                 out.iter().all(|d| !matches!(d, UnifiedDelta::ToolCall(_))),
                 "{payload}: dispatched a non-object payload as tool arguments"
@@ -1685,9 +1748,10 @@ mod reset_and_payload_tests {
             UnifiedToolOutputMode::GuidedJson { named_tool: None },
         )
         .unwrap();
-        p.push(r#"[{"name":"get_weather"},{"name":"get_weather","arguments":{"city":"Paris"}}]"#)
+        let mut out = p
+            .push(r#"[{"name":"get_weather"},{"name":"get_weather","arguments":{"city":"Paris"}}]"#)
             .unwrap();
-        let out = p.finish().unwrap();
+        out.extend(p.finish().unwrap());
         let calls: Vec<_> = out
             .iter()
             .filter_map(|d| match d {
@@ -1713,8 +1777,8 @@ mod reset_and_payload_tests {
             },
         )
         .unwrap();
-        p.push(r#"{"city": "Paris"}"#).unwrap();
-        let out = p.finish().unwrap();
+        let mut out = p.push(r#"{"city": "Paris"}"#).unwrap();
+        out.extend(p.finish().unwrap());
         assert!(
             out.iter().any(|d| matches!(d, UnifiedDelta::ToolCall(_))),
             "object payload not dispatched: {out:?}"
