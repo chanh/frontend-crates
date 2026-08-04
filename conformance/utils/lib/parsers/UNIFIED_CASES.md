@@ -324,4 +324,3 @@ Name the missing DIMENSION, not the example. `guided_json_stray_prefix_before_re
 The check is the count: if a review round produced N defects the corpus missed and the scenario count did not move, the holes are still open.
 
 **A duplicate is worse than a gap.** Before adding, normalize `(input, init, golden)` across the corpus and drop any crossing that already exists. A generated product once recreated three hand-authored scenarios — 9 cases across families — inflating the count while testing nothing new, and leaving two names for one behaviour to drift apart. `test_no_two_scenarios_have_identical_behaviour` now enforces this.
-
