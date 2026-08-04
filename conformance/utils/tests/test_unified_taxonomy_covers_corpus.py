@@ -258,3 +258,31 @@ def test_every_rendered_config_key_exists_in_the_emitted_init() -> None:
         f"conformance_view.js renders {missing}, which no case emits in `init` — "
         "every case would show that setting as unset"
     )
+
+def test_no_two_scenarios_have_identical_behaviour() -> None:
+    """Two names for one behaviour is worse than a gap.
+
+    A generated crossing collided with a hand-authored scenario three times
+    (`guided_json_valid_*` vs `guided_json_tool_*`), giving 3 x 3 families = 9 cases
+    with byte-identical `(input, init, golden)`. They inflated the case count while
+    testing nothing new, and the pair would drift apart on the next edit.
+    """
+    import collections
+    import json as _json
+
+    import yaml
+
+    spec_dir = UTILS.parents[0] / "unified" / "golden_spec"
+    assert spec_dir.is_dir(), f"golden_spec not found at {spec_dir}"
+    for path in sorted(spec_dir.glob("*.yaml")):
+        doc = yaml.safe_load(path.read_text())
+        seen = collections.defaultdict(list)
+        for cid, case in (doc.get("cases") or {}).items():
+            key = _json.dumps(
+                {"input": case["input"], "init": case.get("init"), "golden": case["golden"]},
+                sort_keys=True,
+            )
+            seen[key].append(cid)
+        dupes = {k: v for k, v in seen.items() if len(v) > 1}
+        assert not dupes, f"{path.name}: scenarios with identical behaviour: {list(dupes.values())}"
+

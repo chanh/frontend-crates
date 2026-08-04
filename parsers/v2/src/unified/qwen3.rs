@@ -1315,6 +1315,53 @@ mod tests {
             assert_eq!(got, want, "split at {split}");
         }
     }
+
+    /// A prefix-form header must not BORROW its `>` from a later marker.
+    ///
+    /// `control_marker_at` bounded the `>` scan by the payload start only, so a
+    /// stray `<function=` consumed through the `>` of a following `<think>` and the
+    /// model's PRIVATE reasoning was emitted as visible text. The boundary is the
+    /// earliest payload OR competing control/reasoning marker, and both the consume
+    /// path and the holdback derive it from `prefix_header_end` — one rule, because
+    /// two predicates drifted twice before this.
+    #[test]
+    fn a_prefix_header_never_borrows_a_later_markers_terminator() {
+        let tools = weather_tools();
+        let call = call("get_weather", serde_json::json!({"city": "Paris"}));
+        for (input, want) in [
+            (
+                "<function=<think>secret</think>[{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}]",
+                vec![reasoning("secret"), call.clone()],
+            ),
+            (
+                "<think>I'll call <function=get_weather</think>[{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}]",
+                vec![reasoning("I'll call get_weather"), call.clone()],
+            ),
+        ] {
+            for split in 0..=input.len() {
+                if split > 0 && !input.is_char_boundary(split) {
+                    continue;
+                }
+                let chunks: Vec<&str> = if split == 0 {
+                    vec![input]
+                } else {
+                    vec![&input[..split], &input[split..]]
+                };
+                let got = configured_events(
+                    &tools,
+                    UnifiedParserStartingState::None,
+                    UnifiedToolOutputMode::GuidedJson { named_tool: None },
+                    &chunks,
+                );
+                assert_eq!(got, want, "split at {split} of {input:?}");
+                for ev in &got {
+                    if let UnifiedEvent::Text { text } | UnifiedEvent::Reasoning { text } = ev {
+                        assert!(!text.contains("<function="), "marker leaked: {text:?}");
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

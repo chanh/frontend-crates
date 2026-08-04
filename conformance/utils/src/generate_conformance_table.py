@@ -1530,17 +1530,10 @@ def _stream_on_batch_expected(overlay_case: dict, has_batch_text: bool = True) -
                 "unavailable": "No batch-on-stream capture for this engine."
             }
         elif "unavailable" in block:
-            # A stored `unavailable` that carries a parser EXCEPTION is a measured
-            # result wearing the wrong label: the parser ran and raised. Older shards
-            # recorded those as "parser not captured", putting a real
-            # `ToolParserError::ParsingFailed{...}` in the same bucket as "no parser
-            # exists for this family". Reclassify on read so every existing shard is
-            # corrected without rewriting released capture data.
-            _u = str(block["unavailable"])
-            if "ParsingFailed" in _u or " raised: " in _u or "Error::" in _u:
-                expected[impl] = {"error": _u.replace("parser not captured:", "raised:")}
-            else:
-                expected[impl] = {"unavailable": _u}
+            # Reclassification of exception-bearing `unavailable` blocks lives in ONE
+            # place — `model.normalize_semantics`, run once before compaction. A second
+            # copy of the predicate here is how these two would drift.
+            expected[impl] = {"unavailable": block["unavailable"]}
         else:
             expected[impl] = {
                 "calls": block.get("calls") or [],

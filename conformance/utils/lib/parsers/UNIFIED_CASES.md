@@ -314,3 +314,14 @@ The model blob and the rendered page are different things. A cell can carry corr
 ## Deferred (not in the U0 seed set)
 
 - **n>1 interleave** (`UNIFIED.interleave_n2.*`, the Example-B n>1 LOSS case) needs a multi-choice interleaved driver (extends PR #135's tool-only lanes to carry reasoning state). Its golden is per-choice, a different shape than the single-stream cases here. Author with the n>1 lane.
+
+## A defect the corpus missed owes the corpus a case
+
+Every bug found by a reviewer, another agent, or a probe — that the existing cases did NOT catch — is evidence of a missing case, and the fix is not complete until that case exists here. Prefer a taxonomy scenario over a unit test: a scenario runs for every family and every delivery schedule the harness drives, a unit test runs once for one family. Fall back to a unit test only when the schema cannot express the property, and say why in its doc comment.
+
+Name the missing DIMENSION, not the example. `guided_json_stray_prefix_before_reasoning` and `guided_json_narrated_prefix_inside_reasoning` were added after a stray `<function=` header borrowed its `>` from a following thought opener and emitted the model's private reasoning as visible text. The example was one input; the untested axis was **which control marker owns a terminator when two compete** — and nothing in the corpus had ever asked that question.
+
+The check is the count: if a review round produced N defects the corpus missed and the scenario count did not move, the holes are still open.
+
+**A duplicate is worse than a gap.** Before adding, normalize `(input, init, golden)` across the corpus and drop any crossing that already exists. A generated product once recreated three hand-authored scenarios — 9 cases across families — inflating the count while testing nothing new, and leaving two names for one behaviour to drift apart. `test_no_two_scenarios_have_identical_behaviour` now enforces this.
+

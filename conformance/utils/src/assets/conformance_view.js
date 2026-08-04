@@ -62,6 +62,16 @@
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
   }
+  // Monospace the things that ARE literals: backtick spans the corpus already
+  // writes (`reasoning/core`), and e2e artifact filenames like
+  // `case-0105-schema_escaped_unicode_string__non-stream-budget_capped.json`,
+  // which otherwise wrap mid-token in prose and read as a sentence.
+  // Runs AFTER escapeHtml, so the input is already inert and this only adds tags.
+  function codeSpans(escaped) {
+    return String(escaped)
+      .replace(/`([^`]+)`/g, '<tt>$1</tt>')
+      .replace(/(^|[\s(])(case-\d{3,}-[A-Za-z0-9_.-]+\.json)/g, '$1<tt>$2</tt>');
+  }
   function escapeAttr(s) { return escapeHtml(s); }
   function num(x) { return String(x == null ? 0 : x); }
 
@@ -512,10 +522,10 @@
     // the loud section blue). Falls back to its own line only when there is no id/head.
     if (m.head) {
       h += '<div class="ttip-head">' + escapeHtml(m.head)
-        + (m.description ? ' <span class="ttip-head-desc">' + escapeHtml(m.description) + '</span>' : '')
+        + (m.description ? ' <span class="ttip-head-desc">' + codeSpans(escapeHtml(m.description)) + '</span>' : '')
         + '</div>';
     } else if (m.description) {
-      h += '<div class="ttip-casedesc"><span class="ttip-head-desc">' + escapeHtml(m.description) + '</span></div>';
+      h += '<div class="ttip-casedesc"><span class="ttip-head-desc">' + codeSpans(escapeHtml(m.description)) + '</span></div>';
     }
     // Parser configuration for THIS case, one knob per line, directly under the
     // description it qualifies.
@@ -750,7 +760,7 @@
     // Id + description on ONE line: the id keeps its accent color, the description follows
     // inline in the normal tooltip text color (not the loud section blue).
     var h = '<div class="ttip-head">' + escapeHtml(m.head || '')
-      + (m.desc ? ' <span class="ttip-head-desc">' + escapeHtml(m.desc) + '</span>' : '')
+      + (m.desc ? ' <span class="ttip-head-desc">' + codeSpans(escapeHtml(m.desc)) + '</span>' : '')
       + '</div>';
     // Same builder as the cell popup: a column header and the cells under it describe
     // one configuration, so they cannot drift into showing different knobs.

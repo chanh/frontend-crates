@@ -82,9 +82,6 @@ UNIFIED_TAX = {
     # shape x surrounding grammar. The 31.* rows are the quadrant that had ZERO
     # cases — markup present AND no call recoverable — where both the P2 recovery
     # leak and the unbounded invoke-header scan lived.
-    "guided_json_valid_trailing_close": (30, "h"),
-    "guided_json_valid_wrapped": (30, "i"),
-    "guided_json_valid_bare_opener": (30, "j"),
     "guided_json_syntax_error_trailing_close": (31, "l"),
     "guided_json_syntax_error_wrapped": (31, "m"),
     "guided_json_syntax_error_bare_opener": (31, "n"),
@@ -100,6 +97,11 @@ UNIFIED_TAX = {
     "guided_json_gt_in_argument_trailing_close": (30, "k"),
     "guided_json_gt_in_argument_wrapped": (30, "l"),
     "guided_json_gt_in_argument_bare_opener": (30, "m"),
+
+    # Marker OWNERSHIP: which control marker owns a `>` when two compete. The
+    # corpus had no such case, and the gap leaked private reasoning as text.
+    "guided_json_stray_prefix_before_reasoning": (31, "u"),
+    "guided_json_narrated_prefix_inside_reasoning": (31, "v"),
 
     # Group 40 — Prefilled reasoning, happy
     "prefilled_reasoning_with_tool": (40, "a"), "prefilled_reasoning_with_guided_json": (40, "b"),

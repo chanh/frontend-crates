@@ -601,11 +601,34 @@ struct GuidedState {
 /// — inside a guided argument string, past the end of the thought — be claimed as
 /// the terminator, swallowing the reasoning closer and the entire payload with it,
 /// so the call was silently dropped and payload fragments were shown as thinking.
+/// Where a prefix-form marker's header must end.
+///
+/// ONE rule, used by both the consume path (`control_marker_at`) and the holdback
+/// (`guided_holdback_len`). Two predicates drifted twice: first the `>` scan was
+/// unbounded, then it was bounded only by the payload start — which let a stray
+/// `<function=` BORROW the `>` from a later `<think>`, so
+/// `<function=<think>secret</think>[…]` consumed through the thought opener and
+/// emitted the model's private reasoning as visible text (`I3`).
+///
+/// The boundary is the earliest of: the payload start, and any competing control or
+/// reasoning marker. A header that has no `>` before that point is not a complete
+/// header — it is literal text the model happened to write.
+fn prefix_header_end(haystack: &str, at: usize, limit: Option<usize>, competing: &[&str]) -> usize {
+    let mut bound = limit.unwrap_or(haystack.len()).max(at);
+    for m in competing {
+        if let Some(rel) = haystack[at..bound].find(m) {
+            bound = at + rel;
+        }
+    }
+    bound
+}
+
 fn control_marker_at(
     haystack: &str,
     markers: &[String],
     invoke_end: &str,
     limit: Option<usize>,
+    competing: &[&str],
     flush: bool,
 ) -> Option<(usize, usize)> {
     markers
@@ -619,7 +642,7 @@ fn control_marker_at(
                 // an argument string and emitted the tail `b"}}]` as text, losing
                 // the call; with no `>` anywhere the flush arm consumed the whole
                 // buffer and the turn produced nothing at all.
-                let bound = limit.unwrap_or(haystack.len()).max(at);
+                let bound = prefix_header_end(haystack, at, limit, competing);
                 match haystack[at..bound].find('>') {
                     // An invoke opener owns its terminator: stripping `<function=NAME>`
                     // and leaving `</function>` behind put that fragment in the shown
@@ -631,10 +654,14 @@ fn control_marker_at(
                             .find(invoke_end)
                             .map_or(rel + 1, |e| e + invoke_end.len()),
                     )),
-                    // No terminator before the payload begins: a bare opener. Consume
-                    // the marker ALONE so the payload behind it still parses — taking
-                    // everything to EOF here is what swallowed the call.
-                    None if flush => Some((at, m.len())),
+                    // No `>` before the boundary: this is NOT a header, it is the
+                    // literal marker text. Strip it alone so the payload behind it
+                    // still parses (taking everything to EOF here swallowed the call),
+                    // and strip it NOW when the boundary is already known — a competing
+                    // marker or the payload is present, so more input cannot put a `>`
+                    // in front of it. Waiting emitted `<function=` to the user as text
+                    // and left it inside the thought (`I3`).
+                    None if flush || bound < haystack.len() => Some((at, m.len())),
                     None => None,
                 }
             } else {
@@ -681,7 +708,9 @@ fn guided_holdback_len(
         .filter(|m| m.ends_with('='))
         .filter_map(|m| input.rfind(m.as_str()))
         .filter(|at| {
-            let bound = payload_at.unwrap_or(input.len()).max(*at);
+            // SAME boundary as `control_marker_at` — via the same function, so the
+            // two cannot drift apart again. Reasoning markers compete for the `>`.
+            let bound = prefix_header_end(input, *at, payload_at, reasoning_markers);
             !input[*at..bound].contains('>')
         })
         .map(|at| input.len() - at)
@@ -822,6 +851,11 @@ impl GuidedState {
                         &self.invoke_end,
                         // Nor past the start of the payload itself.
                         self.input.find(['{', '[']),
+                        // A thought marker ahead also ends the header: a stray
+                        // `<function=` must not borrow the `>` from `<think>` and
+                        // swallow the thought — that put private reasoning in the
+                        // user's answer.
+                        &[start, end],
                         flush,
                     )
                     .into_iter()
@@ -959,6 +993,7 @@ impl GuidedState {
                         // A narrated invoke lives INSIDE this thought, so its
                         // terminator cannot be past the span's closer.
                         self.input.find(end),
+                        &[end],
                         flush,
                     )
                     .into_iter()

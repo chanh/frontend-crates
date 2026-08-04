@@ -643,9 +643,17 @@ body.transpose-mode .tab-panel.active .transpose-table { display: table; }
    shrink-wrap to its content (make the marker in-flow, click-anchor out of flow). */
 body.view-overview .transpose-table td.cell,
 body.view-overview .transpose-table th.tcol-model { width: 30px; min-width: 30px; max-width: 30px; }
+/* Transposed DETAILS keeps the marker in normal flow (`position: static` below),
+   so unlike the upright table the marker text really does drive column width.
+   `max-width: none` then let one long marker (e.g. `VPB?SRB?`) stretch its whole
+   column and, with a column per engine, the table far past the viewport. Cap it:
+   `width: auto` still shrink-wraps short columns, the cap just stops the long
+   ones, and the marker ellipsizes rather than forcing the table wider. */
 body.view-details .transpose-table td.cell,
-body.view-details .transpose-table th.tcol-model { width: auto; min-width: 22px; max-width: none; }
-body.view-details .transpose-table td.cell { padding: 3px 2px; }
+body.view-details .transpose-table th.tcol-model { width: auto; min-width: 22px; max-width: 40px; }
+body.view-details .transpose-table td.cell { padding: 3px 1px; overflow: hidden; }
+body.view-details .transpose-table td.cell .marker-text {
+  display: inline-block; max-width: 38px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 body.view-details .transpose-table td.cell .cell-marker,
 body.view-details .transpose-table td.cell .cmp-marker { position: static; }
 body.view-details .transpose-table td.cell > a { position: absolute; inset: 0; }

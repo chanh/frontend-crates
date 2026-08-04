@@ -942,8 +942,15 @@ def _guided_product():
     for pay_name, (payload, want_args) in GUIDED_PAYLOADS.items():
         dispatches = want_args is not None
         for sur_name, (wrap, sur_desc, strips_tail) in GUIDED_SURROUNDS.items():
-            if sur_name == "clean":
-                continue  # already authored as 30.a/30.b and 31.a-31.d
+            # `clean` is already authored as 30.a/30.b and 31.a-31.d. The
+            # `valid` payload crossings are also already authored by hand
+            # (guided_json_tool_open_before_payload / _tool_close_after_payload /
+            # _wrapped_in_tool_markup) — generating them produced 3 scenarios x 3
+            # families = 9 cases with byte-identical (input, init, golden). A
+            # duplicate is worse than a gap: it inflates the case count while
+            # testing nothing new, and two names for one behaviour drift apart.
+            if sur_name == "clean" or pay_name == "valid":
+                continue
             scenario = f"guided_json_{pay_name}_{sur_name}"
             golden = ([{"kind": "tool_call", "name": "get_weather",
                         "arguments": want_args}] if dispatches else
@@ -1020,6 +1027,43 @@ EDGE += [
 # yet: holding the invoke body until its terminator arrives (the obvious repair)
 # costs the call outright when `</function>` never comes, which the split
 # cross-product catches. Tracked so this is a known gap, not a forgotten one.
+
+
+# The corpus had no case where one control marker's terminator sits INSIDE a later
+# marker, so nothing exercised "which marker owns this `>`". That gap let a stray
+# prefix header borrow the `>` from a following thought opener and emit the model's
+# PRIVATE reasoning as visible text. Added as a scenario, not just a unit test,
+# because the property is grammar-shaped and every family has the same question.
+EDGE += [
+    ("guided_json_stray_prefix_before_reasoning",
+     "A bare invoke HEADER with no terminator of its own sits before a reasoning span, so the only "
+     "`>` in reach belongs to the thought opener. The header must NOT claim it: doing so consumed "
+     "the opener, and the model's private reasoning was emitted as user-visible text (`I3`, and a "
+     "privacy failure, not just a cosmetic leak). The header is incomplete markup and is stripped; "
+     "the thought stays a thought.",
+     ["I3"],
+     [{"kind": "reasoning", "text": "secret"},
+      {"kind": "tool_call", "name": "get_weather", "arguments": {"city": "Paris"}}],
+     {"starting_state": "None", "tool_output_mode": "GuidedJson", "named_tool": None},
+     {"finish_reason": "stop"},
+     guided_surroundings(
+         lambda fam: f"{control_tokens(fam)[2]}{r_reason(fam, 'secret')}{GUIDED_ONE_CALL}",
+         "a bare invoke header before a thought must not borrow the thought's terminator")),
+
+    ("guided_json_narrated_prefix_inside_reasoning",
+     "The model NARRATES an invoke header inside its thought and never terminates it, so the only "
+     "`>` in reach belongs to the thought's own closer. The header is literal text the model wrote, "
+     "so it is stripped and the surrounding thought survives intact — it must not swallow the closer "
+     "and it must not survive into the reasoning the user sees.",
+     ["I3"],
+     [{"kind": "reasoning", "text": "I'll call get_weather"},
+      {"kind": "tool_call", "name": "get_weather", "arguments": {"city": "Paris"}}],
+     {"starting_state": "None", "tool_output_mode": "GuidedJson", "named_tool": None},
+     {"finish_reason": "stop"},
+     guided_surroundings(
+         lambda fam: f"{r_reason(fam, 'I' + chr(39) + 'll call ' + control_tokens(fam)[2] + 'get_weather')}{GUIDED_ONE_CALL}",
+         "a narrated invoke header inside a thought is stripped, closer and thought intact")),
+]
 
 
 def _entry(spec, fam):
