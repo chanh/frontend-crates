@@ -651,7 +651,10 @@ body.view-overview .transpose-table th.tcol-model { width: 30px; min-width: 30px
    ones, and the marker ellipsizes rather than forcing the table wider. */
 body.view-details .transpose-table td.cell,
 body.view-details .transpose-table th.tcol-model { width: auto; min-width: 22px; max-width: 40px; }
-body.view-details .transpose-table td.cell { padding: 3px 1px; overflow: hidden; }
+/* NO `overflow: hidden` on the cell: `.ttip` is a CHILD of td.cell, so clipping
+   the cell clips the hover popup itself — the width cap below belongs on the
+   marker span, which is the only thing that needs truncating. */
+body.view-details .transpose-table td.cell { padding: 3px 1px; }
 body.view-details .transpose-table td.cell .marker-text {
   display: inline-block; max-width: 38px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 body.view-details .transpose-table td.cell .cell-marker,
