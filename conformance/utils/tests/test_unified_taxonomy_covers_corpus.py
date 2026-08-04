@@ -266,23 +266,33 @@ def test_no_two_scenarios_have_identical_behaviour() -> None:
     (`guided_json_valid_*` vs `guided_json_tool_*`), giving 3 x 3 families = 9 cases
     with byte-identical `(input, init, golden)`. They inflated the case count while
     testing nothing new, and the pair would drift apart on the next edit.
+
+    Reads the SPEC (`CLEAN`/`EDGE` in the generator), not `conformance/unified/`:
+    that tree is a gitignored build artifact, so a test that reads it passes locally
+    and fails in CI — which is exactly what the first version of this did.
     """
     import collections
     import json as _json
 
-    import yaml
-
-    spec_dir = UTILS.parents[0] / "unified" / "golden_spec"
-    assert spec_dir.is_dir(), f"golden_spec not found at {spec_dir}"
-    for path in sorted(spec_dir.glob("*.yaml")):
-        doc = yaml.safe_load(path.read_text())
+    # EDGE only: its rows carry `(name, desc, policy, golden, init, [stream_cfg,]
+    # per_family)`, which is the tuple that can collide. CLEAN rows are segment
+    # specs with no per-family input dict and cannot duplicate an EDGE scenario.
+    for fam in FAMILIES:
         seen = collections.defaultdict(list)
-        for cid, case in (doc.get("cases") or {}).items():
-            key = _json.dumps(
-                {"input": case["input"], "init": case.get("init"), "golden": case["golden"]},
-                sort_keys=True,
-            )
-            seen[key].append(cid)
+        for case in EDGE:
+            if len(case) == 6:
+                name, _desc, _pol, golden, init, per_family = case
+            elif len(case) == 7:
+                name, _desc, _pol, golden, init, _stream, per_family = case
+            else:
+                continue
+            if not isinstance(per_family, dict) or fam not in per_family:
+                continue
+            entry = per_family[fam]
+            raw_input = entry[0] if isinstance(entry, (tuple, list)) else entry
+            seen[_json.dumps(
+                {"input": raw_input, "init": init, "golden": golden},
+                sort_keys=True, default=str,
+            )].append(name)
         dupes = {k: v for k, v in seen.items() if len(v) > 1}
-        assert not dupes, f"{path.name}: scenarios with identical behaviour: {list(dupes.values())}"
-
+        assert not dupes, f"{fam}: scenarios with identical behaviour: {list(dupes.values())}"
