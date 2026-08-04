@@ -361,6 +361,14 @@ def test_every_wired_element_stays_pinned(driver, transposed):
         const seen = new Set();
         for (const el of tab.querySelectorAll('[data-ttip-wired]')) {
           if (!el.querySelector('.ttip')) continue;
+            // Skip anything not actually RENDERED. A collapsed column is
+            // `display: none` (`.col-hidden`), so its cells cannot be clicked and
+            // have no popup to pin. The driver fixture is session-scoped and
+            // `test_transpose_honors_collapsed_case_group` (just above) collapses a
+            // group without restoring it, so in the FULL suite this picked a
+            // `col-hidden` representative and timed out, while isolated it passed.
+            // Order dependence, not timing — a retry or longer poll would hide it.
+          if (el.offsetParent === null) continue;
           const key = el.tagName.toLowerCase() + '.' + (el.className || '');
           if (!seen.has(key)) seen.add(key);
         }
@@ -378,6 +386,7 @@ def test_every_wired_element_stays_pinned(driver, transposed):
             const tab = document.querySelector('.tab-panel.active') || document;
             for (const el of tab.querySelectorAll('[data-ttip-wired]')) {
               if (!el.querySelector('.ttip')) continue;
+              if (el.offsetParent === null) continue;
               if (el.tagName.toLowerCase() + '.' + (el.className || '') !== arguments[0]) continue;
               el.click();
               return;
