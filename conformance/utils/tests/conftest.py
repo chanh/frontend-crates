@@ -22,3 +22,15 @@ def rendered_page(tmp_path_factory) -> Path:
         check=True, cwd=REPO, capture_output=True, text=True,
     )
     return out
+
+
+@pytest.fixture(autouse=True)
+def restore_browser_page(request):
+    """Reload a shared module driver around each browser test that requests it."""
+    if "driver" not in request.fixturenames:
+        yield
+        return
+    driver = request.getfixturevalue("driver")
+    driver.refresh()
+    yield
+    driver.refresh()

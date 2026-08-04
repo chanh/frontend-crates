@@ -320,12 +320,10 @@ fn dynamo_chunks(family: &str, input: &str, init: &Init) -> Vec<ChunkRow> {
             .iter()
             .map(unified_delta_json)
             .collect();
-        if !tail.is_empty() {
-            rows.push(ChunkRow {
-                delta_text: "‹finish›".to_string(),
-                deltas: tail,
-            });
-        }
+        rows.push(ChunkRow {
+            delta_text: "‹finish›".to_string(),
+            deltas: tail,
+        });
         return rows;
     }
 
@@ -361,13 +359,22 @@ fn dynamo_chunks(family: &str, input: &str, init: &Init) -> Vec<ChunkRow> {
         tool_deltas(&tr, &mut tail);
     }
     tool_deltas(&tp.finish().unwrap_or_default(), &mut tail);
-    if !tail.is_empty() {
-        rows.push(ChunkRow {
-            delta_text: "‹finish›".to_string(),
-            deltas: tail,
-        });
-    }
+    rows.push(ChunkRow {
+        delta_text: "‹finish›".to_string(),
+        deltas: tail,
+    });
     rows
+}
+
+#[test]
+fn finish_is_part_of_the_stream_schedule_even_when_it_emits_nothing() {
+    let rows = dynamo_chunks("qwen3", "plain response", &Init::default());
+    let finish = rows.last().expect("finish row");
+    assert_eq!(finish.delta_text, "‹finish›");
+    assert!(
+        finish.deltas.is_empty(),
+        "fixture must exercise an empty finish"
+    );
 }
 
 /// Classify a Dynamo divergence from the golden.

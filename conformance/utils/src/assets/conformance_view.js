@@ -228,7 +228,7 @@
   }
 
   // --- Output block rendering (mirrors _format_output_block_html) ------------
-  function outputBlock(b, family, ctx) {
+  function outputBlock(b, family, ctx, goldenKinds) {
     if (!b) { return '—'; }
     if (b.unavailable != null) {
       // Prose, not payload: these carry n/a rationale and TODO notes.
@@ -259,7 +259,18 @@
       // A blank line separates the monospaced event stream from the explanation
       // lines (verdict / TODO / note) so they don't read as another event.
       var expl = [];
-      if (b.verdict && b.verdict !== 'MATCH') { expl.push('diverges: ' + escapeHtml(b.verdict)); }
+      if (b.verdict && b.verdict !== 'MATCH') {
+        expl.push('diverges: ' + escapeHtml(b.verdict));
+        // ORDER/MERGE mean every BYTE survived and only the SEQUENCE is wrong.
+        // Naming the class without showing the sequence makes the reader diff
+        // two event lists by eye — so print both orders explicitly.
+        if ((b.verdict === 'ORDER' || b.verdict === 'MERGE') && goldenKinds) {
+          var arrow = ' \u2192 ';
+          var gotKinds = (b.events || []).map(function (ev) { return ev.kind; });
+          expl.push('want: ' + escapeHtml(goldenKinds.join(arrow)));
+          expl.push('got:  ' + escapeHtml(gotKinds.join(arrow)));
+        }
+      }
       if (b.todo) { expl.push(escapeHtml(String(b.todo))); }
       if (b.note) { expl.push(escapeHtml(String(b.note))); }
       if (expl.length) {
@@ -392,6 +403,9 @@
       if (c.key === 'golden') { golden = c; return false; }
       return true;
     });
+    var goldenKinds = golden && golden.block && golden.block.events
+      ? golden.block.events.map(function (ev) { return ev.kind; })
+      : null;
     var header = '';
     cands.forEach(function (c, ci) {
       header += '<th data-cand="' + escapeAttr(c.key) + '" data-cand-order="' + ci + '">'
@@ -430,7 +444,7 @@
       var diverges = c.block && c.block.verdict && c.block.verdict !== 'MATCH';
       fin += '<td data-cand="' + escapeAttr(c.key) + '" data-cand-order="' + ci + '"'
         + (diverges ? ' class="cand-diverge"' : '') + '>'
-        + outputBlock(c.block, family, ctx).replace(/\n/g, '<br>') + '</td>';
+        + outputBlock(c.block, family, ctx, goldenKinds).replace(/\n/g, '<br>') + '</td>';
     });
     fin += '</tr>';
     var inputHdr = golden ? 'input / golden output' : 'input';
@@ -803,9 +817,13 @@
       // One OUTPUT column per candidate (golden pinned first, then Reference, then the
       // rest). data-cand/-order/-pin let applyCtl show only golden + the active columns
       // and order them REF-first, exactly like the cell popup's candidate columns.
+      var goldenBlock = r.blocks && r.blocks.golden;
+      var goldenKinds = goldenBlock && goldenBlock.events
+        ? goldenBlock.events.map(function (ev) { return ev.kind; })
+        : null;
       outCell = cands.map(function (c, ci) {
         var blk = r.blocks && r.blocks[c.key];
-        var inner = blk ? outputBlock(blk, r.family || null, ctx).replace(/\n/g, '<br>')
+        var inner = blk ? outputBlock(blk, r.family || null, ctx, goldenKinds).replace(/\n/g, '<br>')
                         : '<span class="parser-base">—</span>';
         return '<td class="gro" data-cand="' + escapeAttr(c.key) + '" data-cand-order="' + ci + '"'
           + (c.pin ? ' data-cand-pin="1"' : '') + '>' + inner + '</td>';
@@ -923,6 +941,13 @@
       td.appendChild(a);
     }
     if (cell.tooltip) {
+      var hasSequenceDivergence = (cell.tooltip.candidates || []).some(function (candidate) {
+        var verdict = candidate.block && candidate.block.verdict;
+        return verdict === 'ORDER' || verdict === 'MERGE';
+      });
+      if (hasSequenceDivergence) {
+        td.setAttribute('data-sequence-divergence', '1');
+      }
       var ttip = document.createElement('div');
       ttip.className = 'ttip';
       td.appendChild(ttip);

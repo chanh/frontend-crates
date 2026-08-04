@@ -123,6 +123,8 @@ from impls import (  # noqa: E402
     PARSER_NOT_CAPTURED,
     PEER_IMPL_KEYS,
     STREAM_IMPL_KEYS,
+    VLLM_RUST_UNAVAILABLE,
+    unified_parser_path,
 )
 
 # Comparison + marker semantics live in markers.py (audit B5); re-exported here so the
@@ -130,7 +132,6 @@ from impls import (  # noqa: E402
 import markers  # noqa: E402  (module handle: structured comparison model, DIS-2434)
 import unified_taxonomy  # noqa: E402  (shared UNIFIED scenario->numbered-id taxonomy)
 from markers import (  # noqa: E402,F401
-    VLLM_RUST_UNAVAILABLE,
     _BATCH_MODE_MARKER,
     _PARSER_ERROR_RE,
     _STREAM_MODE_MARKER,
@@ -2283,13 +2284,8 @@ def _unified_parser_path(artifact_root_s: str, ver: str) -> str:
     returned nothing", when in fact there was never a unified parser to run — which
     is the actual, interesting difference for a request-mode case.
     """
-    d = _unified_base(Path(artifact_root_s)) / f"dynamo_v2-{ver}"
-    if not d.is_dir():
-        return "unified"
-    for fp in sorted(d.rglob("*.yaml")):
-        if "parser_path: split" in fp.read_text():
-            return "split"
-    return "unified"
+    del artifact_root_s
+    return unified_parser_path(ver)
 
 
 def _dynamo_col_label(artifact_root: Path, ver: str) -> str:

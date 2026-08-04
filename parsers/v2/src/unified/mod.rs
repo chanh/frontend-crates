@@ -487,7 +487,7 @@ impl<E: InvokeEmitter + Send> UnifiedParser for ScannerUnified<E> {
         self.started = true;
         match self.guided.as_mut() {
             None => self.scanner.push_ordered(chunk),
-            Some(guided) => Ok(guided.push(chunk)),
+            Some(guided) => guided.push(chunk),
         }
     }
 
@@ -586,6 +586,9 @@ struct GuidedState {
     /// Some backends re-emit the reasoning opener even though the prompt already
     /// opened the channel. Consume exactly one such echo instead of leaking it.
     accept_redundant_reasoning_start: bool,
+    /// The one guided JSON payload has been emitted. Later bytes are ordinary
+    /// visible/reasoning output and control markup, never a second payload.
+    payload_emitted: bool,
     input: String,
     json: String,
 }
@@ -635,40 +638,59 @@ fn control_marker_at(
         .iter()
         .filter_map(|m| {
             let at = haystack.find(m.as_str())?;
-            if m.ends_with('=') {
-                // BOTH searches stop at `limit`. Bounding only the `</function>`
-                // search let the `>` scan run into the payload: for
-                // `<function=[{"city": "a>b"}]` it consumed through the `>` INSIDE
-                // an argument string and emitted the tail `b"}}]` as text, losing
-                // the call; with no `>` anywhere the flush arm consumed the whole
-                // buffer and the turn produced nothing at all.
-                let bound = prefix_header_end(haystack, at, limit, competing);
-                match haystack[at..bound].find('>') {
-                    // An invoke opener owns its terminator: stripping `<function=NAME>`
-                    // and leaving `</function>` behind put that fragment in the shown
-                    // thinking. Consume the pair when the tail is present; a BARE
-                    // terminator elsewhere stays text, as it is natively.
-                    Some(rel) => Some((
-                        at,
-                        haystack[at..bound]
-                            .find(invoke_end)
-                            .map_or(rel + 1, |e| e + invoke_end.len()),
-                    )),
-                    // No `>` before the boundary: this is NOT a header, it is the
-                    // literal marker text. Strip it alone so the payload behind it
-                    // still parses (taking everything to EOF here swallowed the call),
-                    // and strip it NOW when the boundary is already known — a competing
-                    // marker or the payload is present, so more input cannot put a `>`
-                    // in front of it. Waiting emitted `<function=` to the user as text
-                    // and left it inside the thought (`I3`).
-                    None if flush || bound < haystack.len() => Some((at, m.len())),
-                    None => None,
-                }
-            } else {
-                Some((at, m.len()))
-            }
+            control_marker_len_at(haystack, at, m, invoke_end, limit, competing, flush)
+                .map(|len| (at, len))
         })
         .min_by_key(|(at, _)| *at)
+}
+
+/// Length of `marker` when it owns syntax at the exact byte `at`.
+/// All guided syntax consumers use this owner so prefix-form completeness and
+/// its bounded terminator rule cannot differ between leading, reasoning, and
+/// post-payload paths.
+fn control_marker_len_at(
+    haystack: &str,
+    at: usize,
+    marker: &str,
+    invoke_end: &str,
+    limit: Option<usize>,
+    competing: &[&str],
+    flush: bool,
+) -> Option<usize> {
+    if !haystack[at..].starts_with(marker) {
+        return None;
+    }
+    if marker.ends_with('=') {
+        // BOTH searches stop at `limit`. Bounding only the `</function>`
+        // search let the `>` scan run into the payload: for
+        // `<function=[{"city": "a>b"}]` it consumed through the `>` INSIDE
+        // an argument string and emitted the tail `b"}}]` as text, losing
+        // the call; with no `>` anywhere the flush arm consumed the whole
+        // buffer and the turn produced nothing at all.
+        let bound = prefix_header_end(haystack, at, limit, competing);
+        match haystack[at..bound].find('>') {
+            // An invoke opener owns its terminator: stripping `<function=NAME>`
+            // and leaving `</function>` behind put that fragment in the shown
+            // thinking. Consume the pair when the tail is present; a BARE
+            // terminator elsewhere stays text, as it is natively.
+            Some(rel) => Some(
+                haystack[at..bound]
+                    .find(invoke_end)
+                    .map_or(rel + 1, |e| e + invoke_end.len()),
+            ),
+            // No `>` before the boundary: this is NOT a header, it is the
+            // literal marker text. Strip it alone so the payload behind it
+            // still parses (taking everything to EOF here swallowed the call),
+            // and strip it NOW when the boundary is already known — a competing
+            // marker or the payload is present, so more input cannot put a `>`
+            // in front of it. Waiting emitted `<function=` to the user as text
+            // and left it inside the thought (`I3`).
+            None if flush || bound < haystack.len() => Some(marker.len()),
+            None => None,
+        }
+    } else {
+        Some(marker.len())
+    }
 }
 
 /// Trailing bytes the guided drain must retain across a chunk boundary.
@@ -737,6 +759,64 @@ fn json_payload_kind(payload: &str) -> &'static str {
     }
 }
 
+/// First control-syntax byte outside a JSON string after a payload has opened.
+/// Marker-looking text inside a string remains payload data, including when the
+/// JSON is malformed or truncated. Syntax outside a string is returned to the
+/// normal channel scanner instead of being trimmed by a tail-only implementation.
+fn guided_payload_syntax_boundary(
+    input: &str,
+    reasoning: ReasoningSpec,
+    control_markers: &[String],
+    invoke_end: &str,
+) -> Option<usize> {
+    let start = input.len() - input.trim_start().len();
+    if !matches!(input.as_bytes().get(start), Some(b'{') | Some(b'[')) {
+        return None;
+    }
+
+    let mut in_string = false;
+    let mut escaped = false;
+    for (relative, ch) in input[start..].char_indices() {
+        let at = start + relative;
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            continue;
+        }
+        if at == start {
+            continue;
+        }
+        if input[at..].starts_with(reasoning.start)
+            || input[at..].starts_with(reasoning.end)
+            || input[at..].starts_with(invoke_end)
+            || control_markers.iter().any(|marker| {
+                control_marker_len_at(
+                    input,
+                    at,
+                    marker,
+                    invoke_end,
+                    None,
+                    &[reasoning.start, reasoning.end],
+                    true,
+                )
+                .is_some()
+            })
+        {
+            return Some(at);
+        }
+    }
+    None
+}
+
 impl GuidedState {
     fn new(
         reasoning: ReasoningSpec,
@@ -755,6 +835,7 @@ impl GuidedState {
             mode: Self::mode_for(starting_state),
             accept_redundant_reasoning_start: starting_state
                 == UnifiedParserStartingState::Reasoning,
+            payload_emitted: false,
             input: String::new(),
             json: String::new(),
         }
@@ -768,18 +849,42 @@ impl GuidedState {
         }
     }
 
-    fn push(&mut self, chunk: &str) -> Vec<UnifiedDelta> {
+    fn push(&mut self, chunk: &str) -> Result<Vec<UnifiedDelta>> {
         if self.mode == GuidedMode::VisibleOnly {
             self.json.push_str(chunk);
-            return Vec::new();
+        } else {
+            self.input.push_str(chunk);
         }
-        self.input.push_str(chunk);
-        self.drain(false)
+        let mut output = self.drain(false);
+        output.extend(self.emit_completed_json()?);
+        if self.payload_emitted {
+            output.extend(self.drain(false));
+        }
+        Ok(output)
     }
 
     fn finish(&mut self) -> Result<Vec<UnifiedDelta>> {
         let mut output = self.drain(true);
-        output.extend(self.finish_json()?);
+        output.extend(self.emit_completed_json()?);
+        if self.payload_emitted {
+            output.extend(self.drain(true));
+        } else {
+            if let Some(boundary) = guided_payload_syntax_boundary(
+                &self.json,
+                self.reasoning,
+                &self.control_markers,
+                &self.invoke_end,
+            ) {
+                let tail = self.json.split_off(boundary);
+                let payload_end = self.json.trim_end().len();
+                self.json.truncate(payload_end);
+                self.input.push_str(&tail);
+            }
+            output.extend(self.finish_json()?);
+            self.payload_emitted = true;
+            self.mode = GuidedMode::OutsideReasoning;
+            output.extend(self.drain(true));
+        }
         Ok(output)
     }
 
@@ -793,7 +898,52 @@ impl GuidedState {
         self.reasoning_enabled = starting_state != UnifiedParserStartingState::Response;
         self.accept_redundant_reasoning_start =
             starting_state == UnifiedParserStartingState::Reasoning;
+        self.stripped_markup = false;
+        self.payload_emitted = false;
         recovered
+    }
+
+    /// Emit a complete JSON value as soon as the closing byte arrives. The
+    /// stream decoder gives us the exact end of the first value, so bytes after
+    /// it go back through the channel/control scanner rather than being mistaken
+    /// for JSON or stripped by a separate tail-only marker implementation.
+    fn emit_completed_json(&mut self) -> Result<Vec<UnifiedDelta>> {
+        if self.payload_emitted || !json_payload_started(&self.json) {
+            return Ok(Vec::new());
+        }
+
+        let leading = self.json.len() - self.json.trim_start().len();
+        let mut values = serde_json::Deserializer::from_str(&self.json[leading..])
+            .into_iter::<serde_json::Value>();
+        let Some(Ok(_)) = values.next() else {
+            return Ok(Vec::new());
+        };
+        let value_end = leading + values.byte_offset();
+        drop(values);
+        let whitespace_end = value_end
+            + self.json[value_end..]
+                .find(|ch: char| !ch.is_whitespace())
+                .unwrap_or(self.json.len() - value_end);
+        let syntax_at = guided_payload_syntax_boundary(
+            &self.json,
+            self.reasoning,
+            &self.control_markers,
+            &self.invoke_end,
+        );
+        let (payload_end, tail_start) = if syntax_at == Some(whitespace_end) {
+            // Whitespace separating the value from control syntax belongs to
+            // neither output; the old tail recovery trimmed it with the marker.
+            (value_end, whitespace_end)
+        } else {
+            (value_end, value_end)
+        };
+        let tail = self.json[tail_start..].to_string();
+        self.json.truncate(payload_end);
+        let mut output = self.finish_json()?;
+        self.payload_emitted = true;
+        self.mode = GuidedMode::OutsideReasoning;
+        self.input.push_str(&tail);
+        Ok(std::mem::take(&mut output))
     }
 
     /// Strip the reasoning markers wrapping the JSON payload. Once visible
@@ -819,8 +969,9 @@ impl GuidedState {
                     // dropped the call — while the same bytes arriving in small chunks
                     // latched here first and parsed correctly. Same input, two answers,
                     // decided by chunking (`I6`).
-                    if json_payload_started(&self.json)
-                        || (self.json.trim().is_empty() && json_payload_started(&self.input))
+                    if !self.payload_emitted
+                        && (json_payload_started(&self.json)
+                            || (self.json.trim().is_empty() && json_payload_started(&self.input)))
                     {
                         self.mode = GuidedMode::VisibleOnly;
                         continue;
@@ -876,7 +1027,9 @@ impl GuidedState {
                         let mut pending = std::mem::take(&mut self.json);
                         pending.push_str(&self.input[..at]);
                         if pending.trim().is_empty() {
-                            self.json = pending;
+                            if !self.payload_emitted {
+                                self.json = pending;
+                            }
                         } else {
                             push_run(&mut output, Kind::Text, &pending);
                         }
@@ -896,7 +1049,9 @@ impl GuidedState {
                         let mut pending = std::mem::take(&mut self.json);
                         pending.push_str(&self.input[..at]);
                         if pending.trim().is_empty() {
-                            self.json = pending;
+                            if !self.payload_emitted {
+                                self.json = pending;
+                            }
                         } else {
                             push_run(&mut output, Kind::Text, &pending);
                         }
@@ -926,7 +1081,22 @@ impl GuidedState {
                     };
                     let visible_len = self.input.len().saturating_sub(keep);
                     if visible_len > 0 {
-                        self.json.push_str(&self.input[..visible_len]);
+                        if self.payload_emitted && self.input[..visible_len].trim().is_empty() {
+                            if !flush {
+                                break;
+                            }
+                            if self.named_tool.is_some() {
+                                output.push(UnifiedDelta::ToolCall(ToolCallDelta {
+                                    tool_index: 0,
+                                    name: None,
+                                    arguments: self.input[..visible_len].to_string(),
+                                }));
+                            }
+                        } else if self.payload_emitted {
+                            push_run(&mut output, Kind::Text, &self.input[..visible_len]);
+                        } else {
+                            self.json.push_str(&self.input[..visible_len]);
+                        }
                         self.input.drain(..visible_len);
                         // Latch onto the payload only once it actually LOOKS like
                         // one. Guided decoding constrains the call to bare JSON, so a
@@ -940,7 +1110,11 @@ impl GuidedState {
                         }
                     }
                     if flush && !self.input.is_empty() {
-                        self.json.push_str(&self.input);
+                        if self.payload_emitted {
+                            push_run(&mut output, Kind::Text, &self.input);
+                        } else {
+                            self.json.push_str(&self.input);
+                        }
                         self.input.clear();
                     }
                     break;
@@ -1052,35 +1226,7 @@ impl GuidedState {
     /// expected call shape is surfaced as visible text rather than dropped
     /// (policy P2 — best-effort recovery, never silent loss).
     fn finish_json(&mut self) -> Result<Vec<UnifiedDelta>> {
-        // A control marker can bracket the payload, not just precede it. Once the
-        // opening `{`/`[` latches VisibleOnly every later byte is appended verbatim,
-        // so a template-emitted `</tool_call>` AFTER the JSON rode into the buffer,
-        // broke the parse, and P2 surfaced the whole thing — markup included — with
-        // the call lost. The leading side was already handled; this is the missing
-        // symmetry at the tail.
-        //
-        // Only the TAIL is touched, and only when a marker is actually there: with
-        // no trailing marker the buffer is passed through byte-for-byte, because the
-        // emitted argument string has to stay model-exact (`I7`).
-        let mut end = self.json.trim_end().len();
-        loop {
-            let before = end;
-            for marker in self
-                .control_markers
-                .iter()
-                .map(String::as_str)
-                .chain([self.invoke_end.as_str()])
-            {
-                if self.json[..end].ends_with(marker) {
-                    end = self.json[..end - marker.len()].trim_end().len();
-                }
-            }
-            if end == before {
-                break;
-            }
-        }
-        let stripped_tail = end < self.json.trim_end().len();
-        let payload = self.json[..end].trim();
+        let payload = self.json.trim();
         if payload.is_empty() {
             // The turn produced ONLY control markup — everything was stripped and
             // there is nothing left to parse. Emitting no events is right (markup is
@@ -1108,11 +1254,7 @@ impl GuidedState {
             return Ok(Vec::new());
         }
 
-        let raw_payload = if stripped_tail {
-            self.json[..end].to_string()
-        } else {
-            self.json.clone()
-        };
+        let raw_payload = self.json.clone();
         let calls = match &self.named_tool {
             // A named choice constrains output to that tool's ARGUMENTS alone,
             // so the payload is the argument object and the name is known.
@@ -1427,6 +1569,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn guided_reset_restores_all_request_scoped_flags() {
+        let mut guided = GuidedState::new(
+            ReasoningSpec {
+                start: "<think>",
+                end: "</think>",
+                forced_start: false,
+            },
+            vec!["<tool_call>".into(), "</tool_call>".into()],
+            "</function>".into(),
+            None,
+            UnifiedParserStartingState::None,
+        );
+        guided.push("</tool_call>").unwrap();
+        assert!(guided.stripped_markup, "fixture did not mutate the flag");
+        guided.payload_emitted = true;
+
+        guided.reset(UnifiedParserStartingState::None);
+
+        assert!(!guided.stripped_markup);
+        assert!(!guided.payload_emitted);
+        assert_eq!(guided.mode, GuidedMode::OutsideReasoning);
+        assert!(guided.input.is_empty());
+        assert!(guided.json.is_empty());
+    }
+
     /// The returning and appending spellings are one implementation, so they
     /// cannot disagree — but only a test says so. Without this, `parse_into`
     /// could be re-implemented later and silently drift from `push`, which is
@@ -1575,6 +1743,35 @@ mod tests {
         ]);
         assert_eq!(result.normal_text, "ab");
         assert_eq!(result.calls.len(), 1);
+    }
+
+    #[test]
+    fn debug_wrapper_preserves_capabilities_and_guided_deltas() {
+        let mut plain = qwen3::qwen3_unified(&[]);
+        let mut debug = DebugUnifiedParser::wrap("qwen3", qwen3::qwen3_unified(&[]));
+
+        assert_eq!(
+            plain.preserve_special_tokens(),
+            debug.preserve_special_tokens()
+        );
+        assert_eq!(plain.tool_call_id(0), debug.tool_call_id(0));
+
+        for parser in [&mut plain, &mut debug] {
+            parser
+                .initialize_with_output_mode(
+                    UnifiedParserStartingState::None,
+                    UnifiedToolOutputMode::GuidedJson { named_tool: None },
+                )
+                .unwrap();
+        }
+        for chunk in [
+            "<think>checking</think>",
+            r#"[{"name":"get_weather","arguments":{"city":"Paris"}}]"#,
+        ] {
+            assert_eq!(plain.push(chunk).unwrap(), debug.push(chunk).unwrap());
+        }
+        assert_eq!(plain.finish().unwrap(), debug.finish().unwrap());
+        assert_eq!(plain.reset(), debug.reset());
     }
 
     #[test]

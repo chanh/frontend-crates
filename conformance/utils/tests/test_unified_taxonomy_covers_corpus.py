@@ -15,6 +15,7 @@ the point the case is added, and name the file to edit.
 """
 from __future__ import annotations
 
+from collections import defaultdict
 import json
 import re
 import sys
@@ -25,7 +26,13 @@ SRC = UTILS / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from gen_unified_golden import CLEAN, EDGE, FAMILIES, control_tokens  # noqa: E402
+from gen_unified_golden import (  # noqa: E402
+    CLEAN,
+    EDGE,
+    FAMILIES,
+    build_cases,
+    control_tokens,
+)
 from unified_taxonomy import UNIFIED_GROUP_LABEL, UNIFIED_TAX, numbered_id, tax  # noqa: E402
 
 TAXONOMY_FILE = "conformance/utils/src/unified_taxonomy.py"
@@ -271,28 +278,18 @@ def test_no_two_scenarios_have_identical_behaviour() -> None:
     that tree is a gitignored build artifact, so a test that reads it passes locally
     and fails in CI — which is exactly what the first version of this did.
     """
-    import collections
-    import json as _json
-
-    # EDGE only: its rows carry `(name, desc, policy, golden, init, [stream_cfg,]
-    # per_family)`, which is the tuple that can collide. CLEAN rows are segment
-    # specs with no per-family input dict and cannot duplicate an EDGE scenario.
     for fam in FAMILIES:
-        seen = collections.defaultdict(list)
-        for case in EDGE:
-            if len(case) == 6:
-                name, _desc, _pol, golden, init, per_family = case
-            elif len(case) == 7:
-                name, _desc, _pol, golden, init, _stream, per_family = case
-            else:
-                continue
-            if not isinstance(per_family, dict) or fam not in per_family:
-                continue
-            entry = per_family[fam]
-            raw_input = entry[0] if isinstance(entry, (tuple, list)) else entry
-            seen[_json.dumps(
-                {"input": raw_input, "init": init, "golden": golden},
-                sort_keys=True, default=str,
-            )].append(name)
+        seen = defaultdict(list)
+        for name, case in build_cases(fam).items():
+            seen[
+                json.dumps(
+                    {
+                        "input": case["input"],
+                        "init": case["init"],
+                        "golden": case["golden"],
+                    },
+                    sort_keys=True,
+                )
+            ].append(name)
         dupes = {k: v for k, v in seen.items() if len(v) > 1}
         assert not dupes, f"{fam}: scenarios with identical behaviour: {list(dupes.values())}"

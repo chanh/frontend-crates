@@ -16,9 +16,8 @@ from pathlib import Path
 
 import yaml
 
-from impls import IMPL_DISPLAY, IMPL_KEYS, PEER_IMPL_KEYS
+from impls import IMPL_DISPLAY, IMPL_KEYS, PEER_IMPL_KEYS, VLLM_RUST_UNAVAILABLE
 from markers import (
-    VLLM_RUST_UNAVAILABLE,
     _canonical_impl_key,
     _impl_get,
     _normalize_impl_mapping,
@@ -590,10 +589,16 @@ def _derive_stream_expected(case: dict) -> dict:
     sets the call name; `arguments` fragments are concatenated and parsed as JSON
     (kept as a raw string if not valid JSON — e.g. a truncated body)."""
     unavailable = case.get("unavailable", {}) or {}
+    errors = _normalize_impl_mapping(case.get("errors", {}) or {})
     chunks = case.get("chunks", []) or []
     derived: dict = {}
     unavailable = _normalize_impl_mapping(unavailable)
     for impl in IMPL_KEYS:
+        if impl in errors:
+            derived[impl] = {
+                "error": {"kind": "capture", "message": errors[impl]}
+            }
+            continue
         if impl in unavailable:
             derived[impl] = {"unavailable": unavailable[impl]}
             continue

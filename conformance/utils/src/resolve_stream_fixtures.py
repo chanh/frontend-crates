@@ -70,8 +70,20 @@ def _merge_impl(base_doc, vdoc, impl):
                     if isinstance(ch.get("normal_text"), dict):
                         ch["normal_text"].pop(impl, None)
             continue
+        if "error" in vc:
+            bc.setdefault("errors", {})[impl] = vc["error"]
+            if isinstance(bc.get("unavailable"), dict):
+                bc["unavailable"].pop(impl, None)
+            for ch in bc.get("chunks") or []:
+                if isinstance(ch, dict):
+                    (ch.get("expected") or {}).pop(impl, None)
+                    if isinstance(ch.get("normal_text"), dict):
+                        ch["normal_text"].pop(impl, None)
+            continue
         if isinstance(bc.get("unavailable"), dict):
             bc["unavailable"].pop(impl, None)
+        if isinstance(bc.get("errors"), dict):
+            bc["errors"].pop(impl, None)
         bchunks = bc.get("chunks") or []
         # Clear the impl from EVERY base chunk before applying this version's chunks.
         # A version doc may carry FEWER chunks than the base (the v1 jail records 2

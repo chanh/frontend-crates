@@ -135,6 +135,8 @@ import json
 import os.path
 from typing import Any, Callable, Iterator
 
+from impls import legacy_parser_error
+
 SCHEMA_VERSION = 2
 
 # Interning: only strings at least this long are table-worthy (shorter ones cost as
@@ -281,9 +283,10 @@ def normalize_semantics(node) -> None:
     """
     if isinstance(node, dict):
         u = node.get("unavailable")
-        if isinstance(u, str) and ("ParsingFailed" in u or "Error::" in u or " raised: " in u):
+        error = legacy_parser_error(u)
+        if error is not None:
             node.pop("unavailable")
-            node["error"] = u.replace("parser not captured:", "raised:")
+            node["error"] = error
         for v in node.values():
             normalize_semantics(v)
     elif isinstance(node, list):

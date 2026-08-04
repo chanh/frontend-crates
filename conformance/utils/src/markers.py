@@ -29,22 +29,15 @@ from impls import (
     IMPL_KEYS,
     IMPL_LANG_MARKER,
     LEGACY_IMPL_ALIASES,
-    PARSER_NOT_CAPTURED,
+    PARSER_ERROR_RE,
     PEER_IMPL_KEYS,
     STREAM_IMPL_KEYS,
+    VLLM_RUST_UNAVAILABLE,
+    is_parser_error_unavailable,
 )
 
 _STREAM_MODE_MARKER = "s"
 _BATCH_MODE_MARKER = "b"
-VLLM_RUST_UNAVAILABLE = (
-    # Absence of a `vllm_rust` key says the entry is missing; it does NOT say WHY.
-    # This used to assert "source not available; go run the capture", which sent a
-    # reader after data that cannot exist: vLLM 0.23.0 has no Rust harmony/inkling
-    # parser at all, and 92 cells carried that instruction with nothing to capture.
-    "no vLLM Rust entry recorded for this case — either the capture was not run "
-    "(set VLLM_RUST_SOURCE) or that build has no Rust parser for this family."
-)
-
 _IMPL_DISPLAY = IMPL_DISPLAY
 
 
@@ -315,20 +308,11 @@ def _is_todo_unavailable(block: object) -> bool:
 # set up), which stay a neutral `n/a`. The primary marker is the shared
 # PARSER_NOT_CAPTURED contract the capture wrapper stamps (B11 — not a private
 # guess); the rest cover common runtime-throw phrasings any probe may emit (F2).
-_PARSER_ERROR_RE = re.compile(
-    "|".join(
-        re.escape(p)
-        for p in (PARSER_NOT_CAPTURED, "parsing failed", "parse error", "panicked", "exception", "traceback")
-    ),
-    re.I,
-)
+_PARSER_ERROR_RE = PARSER_ERROR_RE
 
 
 def _is_parser_error_unavailable(block: object) -> bool:
-    if not isinstance(block, dict):
-        return False
-    msg = block.get("unavailable")
-    return isinstance(msg, str) and bool(_PARSER_ERROR_RE.search(msg))
+    return is_parser_error_unavailable(block)
 
 
 def _parser_marker(case: dict | None, impl: str) -> str:

@@ -64,6 +64,7 @@ import capture_vllm_rust as r  # noqa: E402
 import check_family_coverage as cfc  # noqa: E402
 import generate_conformance_table as g  # noqa: E402
 import impls  # noqa: E402
+import fixtures  # noqa: E402
 import validate_fixtures as vf  # noqa: E402
 from tables.reasoning import table as reasoning_table  # noqa: E402
 
@@ -270,7 +271,9 @@ def test_build_stream_fixture_records_vllm_rust_source(monkeypatch, tmp_path) ->
     assert "untagged unknown" in captured
     assert str(source_root.resolve()) not in captured
     unavailable = doc["cases"]["TOOLCALLING.stream.1"]["unavailable"]["vllm_rust"]
-    assert "source checkout is available for the Rust probe" in unavailable
+    assert "no vLLM Rust entry recorded" in unavailable
+    assert "build has no Rust parser for this family" in unavailable
+    assert "Source: untagged unknown" in unavailable
     assert str(source_root.resolve()) not in unavailable
 
 
@@ -538,6 +541,19 @@ def test_stream_v2_x_marker_shows_vllm_rust_error_message() -> None:
     # The error message rides in the model's candidate output block (view shows it).
     block = g._output_block_model(case["expected"][R])
     assert block and block.get("unavailable") == error
+
+
+def test_stream_capture_errors_are_typed_at_the_fixture_boundary() -> None:
+    derived = fixtures._derive_stream_expected(
+        {
+            "errors": {R: "vllm_rust raised: invalid Hermes"},
+            "chunks": [],
+        }
+    )
+    assert derived[R] == {
+        "error": {"kind": "capture", "message": "vllm_rust raised: invalid Hermes"}
+    }
+    assert g._parser_marker({"expected": derived}, R) == "✗"
 
 
 # --------------------------------------------------------------------------- #
@@ -874,6 +890,14 @@ def test_impl_spec_is_single_identity_source() -> None:
     # vLLM Rust is stream-only: no `V_rb` batch parser option exists anywhere.
     assert "vllm_rust" not in g.BATCH_IMPL_KEYS
     assert "vllm_rust" in g.STREAM_IMPL_KEYS
+
+
+def test_unified_parser_path_uses_the_release_boundary_not_fixture_metadata() -> None:
+    root = "/path/does/not/need/to/exist"
+    assert g._unified_parser_path(root, "0.1.22") == "split"
+    assert g._unified_parser_path(root, "0.1.23") == "split"
+    assert g._unified_parser_path(root, "0.1.24") == "unified"
+    assert g._unified_parser_path(root, "0.2.0") == "unified"
 
 
 def test_candidate_label_html_colors_mode_word() -> None:

@@ -91,6 +91,24 @@ def test_hover_shows_tooltip(driver):
     assert visible, "tooltip did not become visible on hover"
 
 
+def test_order_divergence_shows_golden_and_candidate_sequences(driver):
+    """ORDER/MERGE explanations come from the golden candidate in the model."""
+    text = driver.execute_script(
+        """
+        const el = document.querySelector('[data-sequence-divergence]');
+        if (!el) return null;
+        window.__buildTooltip(el);
+        const tip = el.querySelector('.ttip');
+        return tip ? tip.textContent : null;
+        """
+    )
+    assert text, "rendered producer data had no ORDER/MERGE divergence"
+    assert "want:" in text and "got:" in text, text
+    want = text.split("want:", 1)[1].split("got:", 1)[0].strip()
+    got = text.split("got:", 1)[1].splitlines()[0].strip()
+    assert want and got and want != got, text
+
+
 def test_compare_candidates_are_per_tab(driver):
     """Each tab's compare control carries its own candidate rows: the merged Tool
     Calling (batch data) tab offers a vLLM Rust stream candidate; Reasoning does not.
@@ -363,11 +381,9 @@ def test_every_wired_element_stays_pinned(driver, transposed):
           if (!el.querySelector('.ttip')) continue;
             // Skip anything not actually RENDERED. A collapsed column is
             // `display: none` (`.col-hidden`), so its cells cannot be clicked and
-            // have no popup to pin. The driver fixture is session-scoped and
-            // `test_transpose_honors_collapsed_case_group` (just above) collapses a
-            // group without restoring it, so in the FULL suite this picked a
-            // `col-hidden` representative and timed out, while isolated it passed.
-            // Order dependence, not timing — a retry or longer poll would hide it.
+            // have no popup to pin. This remains a product-facing assertion even
+            // though the module-scoped driver is reloaded around every test: hidden
+            // elements are not user-interactable and cannot own a visible popup.
           if (el.offsetParent === null) continue;
           const key = el.tagName.toLowerCase() + '.' + (el.className || '');
           if (!seen.has(key)) seen.add(key);
