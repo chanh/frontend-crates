@@ -263,7 +263,30 @@ def _slot_get(container: Any, key: Any) -> Any:
         return None
 
 
+def _reclassify_exceptions(node) -> None:
+    """A stored `unavailable` carrying a parser EXCEPTION is a measured result.
+
+    The parser RAN and raised; older shards recorded that as "parser not captured",
+    which put a real `ToolParserError::ParsingFailed{...}` in the same bucket as
+    "no parser exists for this family". Absence and failure are opposite findings
+    and must not share a cell style. Done here, at the one place every page passes
+    through, so it corrects every existing shard on read without rewriting released
+    capture data.
+    """
+    if isinstance(node, dict):
+        u = node.get("unavailable")
+        if isinstance(u, str) and ("ParsingFailed" in u or "Error::" in u or " raised: " in u):
+            node.pop("unavailable")
+            node["error"] = u.replace("parser not captured:", "raised:")
+        for v in node.values():
+            _reclassify_exceptions(v)
+    elif isinstance(node, list):
+        for v in node:
+            _reclassify_exceptions(v)
+
+
 def _compact_page(page: dict) -> dict:
+    _reclassify_exceptions(page)
     # Intern repeated long strings into one page-level table.
     counts: dict[str, int] = {}
     for container, key in _iter_intern_slots(page):
