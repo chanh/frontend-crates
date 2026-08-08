@@ -40,7 +40,12 @@ def load_capture(path):
 def case_body(res, impl):
     """Capture result -> the fields a version tree stores for one case."""
     if isinstance(res, dict) and "error" in res:
-        return {"unavailable": f"{impl} parser not captured: {res['error']}"}
+        # The parser RAN and raised — that is a measured result, not an absence.
+        # This used to store it as `unavailable` reading "parser not captured",
+        # which is the opposite of what happened and put a real
+        # `ToolParserError::ParsingFailed{...}` in the same bucket as "no parser
+        # exists for this family". An exception is the engine's answer; show it.
+        return {"error": f"{impl} raised: {res['error']}"}
     chunks = []
     for ch in res:
         entry = {"expected": ch.get("deltas") or []}

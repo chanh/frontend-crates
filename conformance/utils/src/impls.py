@@ -15,6 +15,7 @@ copies this file next to it; the other tools run from `conformance/utils/` direc
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 
 @dataclass(frozen=True)
@@ -77,3 +78,58 @@ FIXTURE_IMPL_ALIASES: dict[str, str] = {
 # structured `error: {kind, message}` block, which the renderer renders as `✗`
 # directly; a plain-string `error` stays a declared expected-error (`!`).
 PARSER_NOT_CAPTURED = "parser not captured"
+
+VLLM_RUST_UNAVAILABLE = (
+    "no vLLM Rust entry recorded for this case — either the capture was not run "
+    "(set VLLM_RUST_SOURCE) or that build has no Rust parser for this family."
+)
+
+
+def vllm_rust_unavailable(source_version: str | None = None) -> str:
+    """One reason formatter for every vLLM Rust capture producer/consumer."""
+    if source_version:
+        return f"{VLLM_RUST_UNAVAILABLE} Source: {source_version}."
+    return VLLM_RUST_UNAVAILABLE
+
+
+PARSER_ERROR_RE = re.compile(
+    "|".join(
+        re.escape(term)
+        for term in (
+            PARSER_NOT_CAPTURED,
+            "parsing failed",
+            "parse error",
+            "panicked",
+            "exception",
+            "traceback",
+            "Error::",
+            "ParsingFailed",
+            " raised: ",
+        )
+    ),
+    re.I,
+)
+
+
+def legacy_parser_error(unavailable: object) -> str | None:
+    """Translate an exception misfiled by a released shard as unavailable."""
+    if not isinstance(unavailable, str) or not PARSER_ERROR_RE.search(unavailable):
+        return None
+    return unavailable.replace("parser not captured:", "raised:")
+
+
+def is_parser_error_unavailable(block: object) -> bool:
+    return (
+        isinstance(block, dict)
+        and legacy_parser_error(block.get("unavailable")) is not None
+    )
+
+
+UNIFIED_PARSER_FIRST_RELEASE = (0, 1, 24)
+
+
+def unified_parser_path(version: str) -> str:
+    """Executable release boundary for Dynamo v2 unified captures."""
+    numbers = tuple(int(part) for part in re.findall(r"\d+", version)[:3])
+    padded = numbers + (0,) * (3 - len(numbers))
+    return "unified" if padded >= UNIFIED_PARSER_FIRST_RELEASE else "split"

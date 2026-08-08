@@ -30,7 +30,10 @@ from pathlib import Path
 
 import yaml
 
-from impls import PARSER_NOT_CAPTURED  # noqa: E402  (shared failure-marker contract, B11)
+from impls import (  # noqa: E402  (shared capture contracts)
+    PARSER_NOT_CAPTURED,
+    vllm_rust_unavailable,
+)
 
 # family -> parser/detector name per engine, loaded from parser_families.yaml (B2 —
 # single source of truth). None = no parser for this engine -> marked unavailable.
@@ -43,11 +46,6 @@ _PEER_FAMILIES = [f for f, s in _FAMILIES.items() if s.get("vllm_python")]
 VLLM = {f: _FAMILIES[f]["vllm_python"] for f in _PEER_FAMILIES}
 VLLM_RUST = {f: _FAMILIES[f]["vllm_rust"] for f in _PEER_FAMILIES if _FAMILIES[f].get("vllm_rust")}
 SGLANG = {f: _FAMILIES[f].get("sglang_python") for f in _PEER_FAMILIES}
-VLLM_RUST_UNAVAILABLE = (
-    "vLLM Rust capture not implemented yet; source checkout is available for the Rust probe."
-)
-
-
 def run(cmd, **kw):
     return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw)
 
@@ -86,12 +84,6 @@ def _vllm_rust_source_version(source):
     except subprocess.CalledProcessError:
         tag = "untagged"
     return f"{tag} {sha}"
-
-
-def _vllm_rust_unavailable(source_version):
-    if source_version:
-        return f"{VLLM_RUST_UNAVAILABLE} Source: {source_version}."
-    return "vLLM Rust source not available; set VLLM_RUST_SOURCE or pass --vllm-rust-source."
 
 
 def _copy_worker(containers):
@@ -261,7 +253,7 @@ def _run_stream(args):
                     vllm_rust_caps.get(fp, {}), vllm_rust_ver or vllm_rust_source_version,
                     args.work, f"{family}_{base}", fp)
             else:
-                cmd += ["--unavailable", f"vllm_rust={_vllm_rust_unavailable(vllm_rust_source_version)}"]
+                cmd += ["--unavailable", f"vllm_rust={vllm_rust_unavailable(vllm_rust_source_version)}"]
             cmd += _impl_args(
                 "vllm_python", family, VLLM[family], vllm_caps.get(fp, {}), vllm_ver,
                 args.work, f"{family}_{base}", fp)
@@ -340,7 +332,7 @@ def _write_overlay(src, outfp, vllm_entry, vllm_rust_entry, sglang_entry, versio
             row["dynamo_v2"] = dynamo_cases[cid]
         if not versions.get("vllm_rust"):
             row["vllm_rust"] = {
-                "unavailable": _vllm_rust_unavailable(None)
+                "unavailable": vllm_rust_unavailable()
             }
         elif vllm_rust_parser is None:
             row["vllm_rust"] = {

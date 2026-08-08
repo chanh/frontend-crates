@@ -123,6 +123,8 @@ from impls import (  # noqa: E402
     PARSER_NOT_CAPTURED,
     PEER_IMPL_KEYS,
     STREAM_IMPL_KEYS,
+    VLLM_RUST_UNAVAILABLE,
+    unified_parser_path,
 )
 
 # Comparison + marker semantics live in markers.py (audit B5); re-exported here so the
@@ -130,7 +132,6 @@ from impls import (  # noqa: E402
 import markers  # noqa: E402  (module handle: structured comparison model, DIS-2434)
 import unified_taxonomy  # noqa: E402  (shared UNIFIED scenario->numbered-id taxonomy)
 from markers import (  # noqa: E402,F401
-    VLLM_RUST_UNAVAILABLE,
     _BATCH_MODE_MARKER,
     _PARSER_ERROR_RE,
     _STREAM_MODE_MARKER,
@@ -1530,6 +1531,9 @@ def _stream_on_batch_expected(overlay_case: dict, has_batch_text: bool = True) -
                 "unavailable": "No batch-on-stream capture for this engine."
             }
         elif "unavailable" in block:
+            # Reclassification of exception-bearing `unavailable` blocks lives in ONE
+            # place — `model.normalize_semantics`, run once before compaction. A second
+            # copy of the predicate here is how these two would drift.
             expected[impl] = {"unavailable": block["unavailable"]}
         else:
             expected[impl] = {
@@ -2270,6 +2274,27 @@ def _load_unified_fixtures(base: Path):
     return cases, caps, versions
 
 
+@functools.lru_cache(maxsize=None)
+def _unified_parser_path(artifact_root_s: str, ver: str) -> str:
+    """WHICH parser produced a version's capture: the unified one, or the chained
+    reasoning+tool pair (the SPLIT path).
+
+    A build that predates the unified module can only answer through the split path.
+    Labelling its column "Unified" makes an empty cell read as "the unified parser
+    returned nothing", when in fact there was never a unified parser to run — which
+    is the actual, interesting difference for a request-mode case.
+    """
+    del artifact_root_s
+    return unified_parser_path(ver)
+
+
+def _dynamo_col_label(artifact_root: Path, ver: str) -> str:
+    """Column label for a Dynamo v2 capture, naming the path that actually ran."""
+    if _unified_parser_path(str(artifact_root), ver) == "split":
+        return f"Dynamo v2 Rust {ver} (stream, SPLIT ONLY — no unified parser in this build)"
+    return f"Dynamo v2 Rust {ver} (stream, Combined & Unified)"
+
+
 def _unified_tab_model(artifact_root: Path, hrefs: dict) -> dict | None:
     """Build the Unified (reasoning + tools) tab from the versioned fixture shards
     (conformance/fixtures/unified/: inputs + golden + one <impl>-<version> shard per
@@ -2386,7 +2411,7 @@ def _unified_tab_model(artifact_root: Path, hrefs: dict) -> dict | None:
     # is that the version is THERE to click, not that it is compared by default.
     # impl="dynamo" groups them under the one Dynamo engine block of the compare bar.
     for v in reversed(dynamo_all_vers[:-1]):
-        pc = _cand(f"dynamo@{v}", f"Dynamo v2 Rust {v} (stream, Combined & Unified)", "C")
+        pc = _cand(f"dynamo@{v}", _dynamo_col_label(artifact_root, v), "C")
         pc["impl"] = "dynamo"
         pc["version"] = v
         candidates.append(pc)
@@ -2540,7 +2565,18 @@ def _unified_tab_model(artifact_root: Path, hrefs: dict) -> dict | None:
                      "block": ({"events": vllm_events, "verdict": vverd,
                                 "note": c.get("vllm_note")}
                                if vllm_events is not None
-                               else {"expected": vverd, "note": c.get("vllm_note")})},
+                                 # No capture => say NOT CAPTURED. This used to be
+                                 # `{"expected": vverd}`, rendering "expected: MATCH"
+                                 # — a verdict with nothing behind it. A claim can only
+                                 # ever read MATCH (there is nothing to compare), so every
+                                 # uncaptured cell silently counted as a pass while only
+                                 # captured cells could go red. Absence must look like
+                                 # absence; the authored expectation stays as context.
+                                 else {"unavailable": (
+                                           f"not captured for this case — needs the vLLM "
+                                           f"{vllm_ver_label} Python harness "
+                                           f"(authored expectation: {vverd})"),
+                                       "note": c.get("vllm_note")})},
                 ] + ([
                     {"key": "vllm_rust",
                      "label": f"vLLM Rust {vrust_ver_label} (stream, {vrust_parser.replace('vLLM Rust ', '').strip('()')})",
@@ -2559,7 +2595,7 @@ def _unified_tab_model(artifact_root: Path, hrefs: dict) -> dict | None:
                     # that never recorded this case says so instead of showing an empty
                     # event list that reads like the parser produced nothing.
                     {"key": f"dynamo@{pv}",
-                     "label": f"Dynamo v2 Rust {pv} (stream, Combined & Unified)",
+                     "label": _dynamo_col_label(artifact_root, pv),
                      "impl": "dynamo", "version": pv, "parse_mode": "unified",
                      "leak": bool(cmp.get(f"dynamo@{pv}", {}).get("leak")),
                      "block": ({"unavailable": f"not captured at {pv} — this case postdates that build"}

@@ -135,6 +135,8 @@ import json
 import os.path
 from typing import Any, Callable, Iterator
 
+from impls import legacy_parser_error
+
 SCHEMA_VERSION = 2
 
 # Interning: only strings at least this long are table-worthy (shorter ones cost as
@@ -207,13 +209,17 @@ def build_page(meta: dict, tabs: list[dict], *, parser_ni: dict | None = None,
         for req in ("id", "kind", "label", "rows", "columns", "candidates", "stats"):
             if req not in tab:
                 raise ValueError(f"model tab #{i} missing required key {req!r}")
-    return _compact_page({
+    page = {
         "schema": SCHEMA_VERSION,
         "meta": meta,
         "parser_ni": parser_ni or {},
         "legend_html": legend_html,
         "tabs": tabs,
-    })
+    }
+    # Semantics FIRST, encoding second: an exception filed as `unavailable` is
+    # reclassified here so `_compact_page`/`hydrate_page` stay an exact inverse.
+    normalize_semantics(page)
+    return _compact_page(page)
 
 
 # --- Schema-2 compaction (mirrored by hydratePage in conformance_view.js) -----------
@@ -263,7 +269,37 @@ def _slot_get(container: Any, key: Any) -> Any:
         return None
 
 
+def normalize_semantics(node) -> None:
+    """THE one semantic normalization pass over a page, run BEFORE compaction.
+
+    A stored `unavailable` carrying a parser EXCEPTION is a measured result.
+
+    The parser RAN and raised; older shards recorded that as "parser not captured",
+    which put a real `ToolParserError::ParsingFailed{...}` in the same bucket as
+    "no parser exists for this family". Absence and failure are opposite findings
+    and must not share a cell style. Done here, at the one place every page passes
+    through, so it corrects every existing shard on read without rewriting released
+    capture data.
+    """
+    if isinstance(node, dict):
+        u = node.get("unavailable")
+        error = legacy_parser_error(u)
+        if error is not None:
+            node.pop("unavailable")
+            node["error"] = error
+        for v in node.values():
+            normalize_semantics(v)
+    elif isinstance(node, list):
+        for v in node:
+            normalize_semantics(v)
+
+
 def _compact_page(page: dict) -> dict:
+    # NO semantic normalization here. `_compact_page`/`hydrate_page` are a wire
+    # encoding and are TESTED as an exact inverse; running `normalize_semantics`
+    # inside broke that (a classified exception hydrated back as `error`, not the
+    # `unavailable` it went in as). Callers run the normalizer explicitly, before
+    # compaction — see `normalize_semantics`.
     # Intern repeated long strings into one page-level table.
     counts: dict[str, int] = {}
     for container, key in _iter_intern_slots(page):

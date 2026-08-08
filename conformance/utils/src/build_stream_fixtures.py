@@ -29,10 +29,10 @@ from pathlib import Path
 
 import yaml
 
-from impls import IMPL_KEYS, LEGACY_IMPL_ALIASES  # noqa: E402  (identity table; see impls.py)
-
-VLLM_RUST_UNAVAILABLE = (
-    "vLLM Rust capture not implemented yet; source checkout is available for the Rust probe."
+from impls import (  # noqa: E402  (identity and capture contracts)
+    IMPL_KEYS,
+    LEGACY_IMPL_ALIASES,
+    vllm_rust_unavailable,
 )
 
 
@@ -84,12 +84,6 @@ def _vllm_rust_source_version(source):
     except subprocess.CalledProcessError:
         tag = "untagged"
     return f"{tag} {sha}"
-
-
-def _vllm_rust_unavailable(source_version):
-    if source_version:
-        return f"{VLLM_RUST_UNAVAILABLE} Source: {source_version}."
-    return "vLLM Rust source not available; set VLLM_RUST_SOURCE or pass --vllm-rust-source."
 
 
 def _q(s) -> str:
@@ -161,7 +155,7 @@ def main():
     if not caps["vllm_rust"]:
         unavail.setdefault(
             "vllm_rust",
-            _vllm_rust_unavailable(vllm_rust_source_version),
+            vllm_rust_unavailable(vllm_rust_source_version),
         )
     na_impls = {_canonical_impl_key(impl) for impl in args.na}
     captured_versions = {
@@ -206,6 +200,7 @@ def main():
                                             allow_unicode=True, sort_keys=False).rstrip(), 4))
         # unavailable block
         case_unavail = dict(unavail)
+        case_errors = {}
         # Per-case capture errors: the probe emits {"error": ...} for a case the
         # parser rejected (e.g. garbage/incomplete tool call). That's expected
         # behavior for some edge cases, not a chunk list — record it as a
@@ -215,10 +210,14 @@ def main():
                 continue
             cap = caps.get(impl, {}).get(cid)
             if isinstance(cap, dict):
-                case_unavail[impl] = f"{impl} parser not captured: {cap.get('error', 'capture failed')}"
+                case_errors[impl] = f"{impl} raised: {cap.get('error', 'capture failed')}"
         if case_unavail:
             L.append("    unavailable:")
             for impl, reason in case_unavail.items():
+                L.append(f"      {impl}: {_q(reason)}")
+        if case_errors:
+            L.append("    errors:")
+            for impl, reason in case_errors.items():
                 L.append(f"      {impl}: {_q(reason)}")
         # chunks
         L.append("    chunks:")
@@ -234,7 +233,7 @@ def main():
             exp_lines = []
             nt_lines = []
             for impl in IMPL_KEYS:
-                if impl in case_unavail or impl in na_impls:
+                if impl in case_unavail or impl in case_errors or impl in na_impls:
                     continue
                 cap = caps.get(impl, {}).get(cid)
                 if cap is None:

@@ -64,6 +64,7 @@ import capture_vllm_rust as r  # noqa: E402
 import check_family_coverage as cfc  # noqa: E402
 import generate_conformance_table as g  # noqa: E402
 import impls  # noqa: E402
+import fixtures  # noqa: E402
 import validate_fixtures as vf  # noqa: E402
 from tables.reasoning import table as reasoning_table  # noqa: E402
 
@@ -270,7 +271,9 @@ def test_build_stream_fixture_records_vllm_rust_source(monkeypatch, tmp_path) ->
     assert "untagged unknown" in captured
     assert str(source_root.resolve()) not in captured
     unavailable = doc["cases"]["TOOLCALLING.stream.1"]["unavailable"]["vllm_rust"]
-    assert "source checkout is available for the Rust probe" in unavailable
+    assert "no vLLM Rust entry recorded" in unavailable
+    assert "build has no Rust parser for this family" in unavailable
+    assert "Source: untagged unknown" in unavailable
     assert str(source_root.resolve()) not in unavailable
 
 
@@ -540,6 +543,19 @@ def test_stream_v2_x_marker_shows_vllm_rust_error_message() -> None:
     assert block and block.get("unavailable") == error
 
 
+def test_stream_capture_errors_are_typed_at_the_fixture_boundary() -> None:
+    derived = fixtures._derive_stream_expected(
+        {
+            "errors": {R: "vllm_rust raised: invalid Hermes"},
+            "chunks": [],
+        }
+    )
+    assert derived[R] == {
+        "error": {"kind": "capture", "message": "vllm_rust raised: invalid Hermes"}
+    }
+    assert g._parser_marker({"expected": derived}, R) == "✗"
+
+
 # --------------------------------------------------------------------------- #
 # cross-engine conformance (batch / stream tabs)
 # --------------------------------------------------------------------------- #
@@ -658,7 +674,14 @@ def test_template_has_compare_picker_and_reasoning_candidates() -> None:
 def test_template_overview_cells_do_not_expand_from_hidden_marker_text() -> None:
     # Static styles now live in the CSS asset, inlined at render (audit B7).
     css = (SRC / "assets" / "conformance.css").read_text()
-    assert "td.cell { position: relative; text-align: center; width: 44px; min-width: 44px; max-width: 44px;" in css
+    # The guard is that width is PINNED on all three properties so hidden marker
+    # text cannot expand a cell — not the specific number, which is a layout
+    # choice (44px -> 26px once the unified tab reached 240 case columns).
+    m = re.search(
+        r"td\.cell \{ position: relative; text-align: center; "
+        r"width: (\d+)px; min-width: \1px; max-width: \1px;", css)
+    assert m, "td.cell must pin width/min-width/max-width to the SAME value"
+    assert 16 <= int(m.group(1)) <= 60, f"implausible cell width {m.group(1)}px"
     assert ".view-overview td.cell { font-size: 0; line-height: 0; }" in css
     assert ".view-overview td.cell .cell-marker { display: none; }" in css
     assert ".view-overview td.cell .ttip { font-size: 12px; line-height: 1.4; }" in css
@@ -715,11 +738,16 @@ def test_template_cells_do_not_clip_hover_tooltips() -> None:
     assert cell_rule is not None
     assert "overflow: hidden" not in cell_rule.group(1)
     assert ".ttip-visible" in css
-    # Hover-show is now gated on hover-capable devices (touch uses tap-to-pin), so
-    # the listener is wired inside a `matchMedia('(hover: hover)')` branch rather
-    # than as a bare top-level call. Assert both the gate and the pointerenter wiring.
-    assert "matchMedia('(hover: hover)')" in js
+    # Hover listeners are registered UNCONDITIONALLY. They used to sit behind a
+    # `matchMedia('(hover: hover)')` gate, and this assertion pinned that gate in place as
+    # if it were the contract — while Chrome on a normal desktop reported the query false
+    # and delivered real hover anyway, so the popup never opened and this test stayed green.
+    # A media query describes a device; it does not decide which events arrive. Assert the
+    # gate is GONE and the listeners are top-level.
     assert "cell.addEventListener('pointerenter'" in js
+    assert "matchMedia" not in js, (
+        "hover/pointer listener registration must not depend on a media query"
+    )
 
 
 def test_toolcalling_parser_options_are_mode_specific() -> None:
@@ -867,6 +895,14 @@ def test_impl_spec_is_single_identity_source() -> None:
     # vLLM Rust is stream-only: no `V_rb` batch parser option exists anywhere.
     assert "vllm_rust" not in g.BATCH_IMPL_KEYS
     assert "vllm_rust" in g.STREAM_IMPL_KEYS
+
+
+def test_unified_parser_path_uses_the_release_boundary_not_fixture_metadata() -> None:
+    root = "/path/does/not/need/to/exist"
+    assert g._unified_parser_path(root, "0.1.22") == "split"
+    assert g._unified_parser_path(root, "0.1.23") == "split"
+    assert g._unified_parser_path(root, "0.1.24") == "unified"
+    assert g._unified_parser_path(root, "0.2.0") == "unified"
 
 
 def test_candidate_label_html_colors_mode_word() -> None:
