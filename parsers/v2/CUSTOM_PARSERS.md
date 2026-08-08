@@ -91,6 +91,8 @@ All have defaults, so implement only what your grammar needs.
 | Method | Implement it when |
 |---|---|
 | `initialize(&[u32])` | your prompt can end mid-channel and you want to detect that from prompt tokens |
+| `initialize_with_state(..)` | your caller already knows the channel state and can just say so |
+| `initialize_with_output_mode(..)` | you support guided-JSON tool output as well as native markup |
 | `preserve_special_tokens()` | your markers ARE tokenizer special tokens, so text that dropped them is unparseable |
 | `tool_call_id(idx)` | your grammar names the call itself and the id should come from the model |
 | `reset()` | you can hand back unconsumed text on abort. Note this returns to a FRESH-STREAM state — tool indices restart, so the returned text must be re-parsed as a NEW stream |
@@ -112,4 +114,4 @@ This trait is aligned with the peer streaming-parser traits other serving engine
 Two caveats worth knowing before you plan on a literal drop-in:
 
 - Rust is nominally typed, so an identically-shaped type in another crate is still a different type. Porting is a mechanical translation, not a recompile.
-- This crate adds surface the peer traits do not have — `parse_complete` and the assembled `UnifiedEvent` view. Both are additive, so a peer-shaped caller never sees them, and a peer-shaped parser that does not provide them falls back to their defaults.
+- This crate adds surface the peer traits do not have — `initialize_with_state`, `initialize_with_output_mode`, `parse_complete`, and the assembled `UnifiedEvent` view. All are additive, so a peer-shaped caller never sees them, but a peer-shaped parser will not provide them either and will fall back to their defaults.
